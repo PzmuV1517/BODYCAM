@@ -8,6 +8,7 @@ StartLimitIntervalSec=0
 Type=simple
 ExecStart=/usr/bin/python3 /opt/bodycam/ble.py
 Restart=always
+TimeoutStopSec=5
 RestartSec=2
 
 [Install]

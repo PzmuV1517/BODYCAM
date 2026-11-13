@@ -11,6 +11,7 @@ ExecStartPre=-/bin/sh -c 'echo ondemand > /sys/devices/system/cpu/cpufreq/policy
 ExecStartPre=-/usr/sbin/iw dev wlan0 set power_save off
 ExecStart=/usr/bin/python3 /opt/bodycam/server.py
 Restart=always
+TimeoutStopSec=5
 RestartSec=1
 Nice=-10
 

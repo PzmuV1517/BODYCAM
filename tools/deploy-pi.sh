@@ -34,9 +34,14 @@ if [ $SSH_RC -ne 0 ]; then
     - 'Connection closed' right after connecting: something else answers at $HOST (wrong network?)."
 fi
 
+step "set the Pi clock from this Mac (the Pi has no internet/NTP and no RTC battery)"
+ssh "${SSH_OPTS[@]}" "admin@$HOST" "echo \"    Pi clock was: \$(date)\"; sudo date -s @$(date +%s) >/dev/null && echo \"    Pi clock now: \$(date)\"" || die "could not set the clock"
+
 step "copy pi/ to the Pi (file list below)"
 info "local: $(find "$DIR/pi" -type f -not -path '*__pycache__*' | wc -l | tr -d ' ') files, $(du -sh "$DIR/pi" | cut -f1)"
-if ! tar -C "$DIR" --exclude='__pycache__' -czf - pi | ssh "${SSH_OPTS[@]}" "admin@$HOST" 'rm -rf ~/pi && tar -xzvf - -C ~ 2>&1 | sed "s/^/      /"'; then
+# COPYFILE_DISABLE / --no-xattrs / --no-mac-metadata: no macOS ._* files or extended attributes
+if ! COPYFILE_DISABLE=1 tar -C "$DIR" --exclude='__pycache__' --exclude='.DS_Store' --no-xattrs --no-mac-metadata -czf - pi \
+     | ssh "${SSH_OPTS[@]}" "admin@$HOST" 'rm -rf ~/pi && tar --warning=no-unknown-keyword -xzvf - -C ~ 2>&1 | sed "s/^/      /"'; then
   die "copy failed"
 fi
 
@@ -52,12 +57,11 @@ sudo rm -rf /opt/bodycam/vendor
 sudo cp -r ~/pi/bodycam/vendor /opt/bodycam/vendor
 sudo install -m 644 ~/pi/bodycam.service ~/pi/bodycam-ble.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl unmask bluetooth hciuart || true
+sudo systemctl unmask bluetooth || true
 sudo systemctl enable --now bluetooth
-sudo systemctl enable --now hciuart || true
 sudo systemctl enable bodycam bodycam-ble
-sudo systemctl restart bodycam
-sudo systemctl restart bodycam-ble
+sudo timeout 30 systemctl restart bodycam
+sudo timeout 30 systemctl restart bodycam-ble
 { set +x; } 2>/dev/null
 
 echo "    -- quiet fan curve"

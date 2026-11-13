@@ -497,7 +497,10 @@ def main():
     cam = open_camera(a, lores_size)
 
     def stop(*_):
-        st.running = False
+        # Exit right away: closing the Hailo while an inference is running can deadlock, and the
+        # kernel releases the camera and Hailo anyway. Keeps restarts/deploys to ~1 s.
+        log.info("stopping")
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
