@@ -6,8 +6,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# Max CPU clocks (lower encode latency) and no Wi-Fi power saving (avoids latency spikes/drops).
-ExecStartPre=-/bin/sh -c 'echo performance > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor'
+# No Wi-Fi power saving (avoids latency spikes/drops). CPU governor left on default: less heat, quieter fan.
+ExecStartPre=-/bin/sh -c 'echo ondemand > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor'
 ExecStartPre=-/usr/sbin/iw dev wlan0 set power_save off
 ExecStart=/usr/bin/python3 /opt/bodycam/server.py
 Restart=always

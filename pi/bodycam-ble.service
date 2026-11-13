@@ -1,0 +1,14 @@
+[Unit]
+Description=BODYCAM BLE console (status, logs, Wi-Fi recovery, shell)
+After=bluetooth.service
+Requires=bluetooth.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/bodycam/ble.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

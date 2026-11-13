@@ -3,3 +3,4 @@ __pycache__/
 .DS_Store
 out.h264
 tools/field-report.txt
+tools/.venv/

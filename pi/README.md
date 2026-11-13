@@ -71,3 +71,27 @@ stream with an immediate keyframe. If no `HELLO` for 2 s, the Pi stops sending (
 | `0x03` STATUS | `u8 type, u32 seq, u8 ai_enabled, u8 hailo_ok, u8 enc_fps, u8 infer_fps, u8 cpu_temp_c` | reply to every HELLO (`seq` echoed → RTT / link alive) |
 
 Vibration alerts are decided on the phone from DETECT packets (so the alert toggle is phone-only).
+
+## Bluetooth console (`bodycam-ble`)
+
+BLE Nordic UART Service, advertised as `BODYCAM`. Login is challenge/response with the Pi's Wi-Fi
+password (HMAC-SHA256 of a one-time nonce, password never sent). After login the traffic is not
+encrypted, so treat command output as visible to anyone recording BLE nearby.
+
+Commands: `status`, `logs [n]`, `wifi restart`, `service restart`, `reboot`, `sh <command>`.
+
+From the Mac (any Wi-Fi, just within Bluetooth range): `tools/ble status`, `tools/ble logs 100`,
+`tools/ble sh "uptime"`, `tools/ble shell`. Set `BODYCAM_PASS` to skip the password prompt.
+
+The phone app uses it automatically: if Wi-Fi is down for 6 s it checks the AP over BLE and
+restarts it if it is down.
+
+## Updating (no Ethernet, no internet on the Pi)
+
+Join the Mac to the `BODYCAM` Wi-Fi, then `tools/deploy-pi.sh`. It copies the code (including the
+vendored pure-Python D-Bus library for BLE), restarts both services, applies the quiet fan curve
+and reboots once if the fan curve changed.
+
+## Fan
+
+Quiet curve in `fan-quiet.conf`: off below 65 C, gentle to 78 C, full at 82 C.

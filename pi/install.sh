@@ -11,21 +11,25 @@ apt-get install -y hailo-all python3-picamera2 python3-av python3-numpy rpicam-a
 # PCIe Gen3 for the AI HAT+
 CFG=/boot/firmware/config.txt
 grep -q '^dtparam=pciex1_gen=3' "$CFG" || echo 'dtparam=pciex1_gen=3' >> "$CFG"
+# Quiet fan curve
+sed -i '/fan_temp/d;/BODYCAM quiet fan/d;/^# Off below 65C/d' "$CFG"
+cat "$DIR/fan-quiet.conf" >> "$CFG"
 
 install -d /opt/bodycam
-install -m 755 "$DIR/bodycam/server.py" /opt/bodycam/server.py
-install -m 644 "$DIR/bodycam.service" /etc/systemd/system/bodycam.service
+install -m 755 "$DIR/bodycam/server.py" "$DIR/bodycam/ble.py" /opt/bodycam/
+rm -rf /opt/bodycam/vendor && cp -r "$DIR/bodycam/vendor" /opt/bodycam/vendor
+install -m 644 "$DIR/bodycam.service" "$DIR/bodycam-ble.service" /etc/systemd/system/
 
 # Hardware watchdog: reboot the Pi if the whole system hangs.
 mkdir -p /etc/systemd/system.conf.d
 printf '[Manager]\nRuntimeWatchdogSec=15\n' > /etc/systemd/system.conf.d/watchdog.conf
 
 # Things a headless field device doesn't need (faster boot, less CPU).
-for s in bluetooth hciuart ModemManager avahi-daemon triggerhappy cups apt-daily.timer apt-daily-upgrade.timer man-db.timer; do
+for s in ModemManager avahi-daemon triggerhappy cups apt-daily.timer apt-daily-upgrade.timer man-db.timer; do
   systemctl disable --now "$s" 2>/dev/null || true
 done
 
 systemctl daemon-reload
-systemctl enable bodycam.service
+systemctl enable bodycam.service bodycam-ble.service bluetooth.service
 echo
 echo "Installed. Next: sudo ./setup-ap.sh <SSID> <PASSWORD> <COUNTRY>, then sudo reboot."

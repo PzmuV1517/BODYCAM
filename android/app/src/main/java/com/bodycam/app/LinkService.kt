@@ -39,6 +39,7 @@ class LinkService : Service() {
         val pi: PiStatus?,
         val persons: Int,
         val demo: Boolean,
+        val bleNote: String?,
     )
 
     interface Listener {
@@ -59,6 +60,10 @@ class LinkService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
 
     private var connector: WifiConnector? = null
+    private var ble: BleRescue? = null
+    @Volatile private var bleNote: String? = null
+    private var linkDownSince = 0L
+    private var lastBleCheck = 0L
     @Volatile private var client: StreamClient? = null
     private var network: Network? = null
     private val decoderLock = Any()
@@ -130,6 +135,7 @@ class LinkService : Service() {
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "bodycam:link").apply { setReferenceCounted(false); acquire() }
 
+        ble = BleRescue(this) { note -> bleNote = note }
         reconnect()
         main.post(ticker)
     }
@@ -144,6 +150,7 @@ class LinkService : Service() {
         demoThread?.interrupt()
         connector?.stop()
         client?.close()
+        ble?.quit()
         setSurface(null)
         wifiLock?.release()
         wakeLock?.release()
@@ -325,11 +332,20 @@ class LinkService : Service() {
                 now - lastFrameAt > 1000 -> Phase.STALLED
                 else -> Phase.LIVE
             }
+            // Wi-Fi down for >6 s: ask the Pi over Bluetooth what's wrong (and restart its AP if needed).
+            val down = !demo && (phase == Phase.NO_WIFI || phase == Phase.NO_PI)
+            if (!down) { linkDownSince = 0L; bleNote = null }
+            else if (linkDownSince == 0L) linkDownSince = now
+            if (down && now - linkDownSince > 6000 && now - lastBleCheck > 20_000 && ble?.busy == false) {
+                lastBleCheck = now
+                bleNote = "BLE: CHECKING"
+                ble?.check(password, ssid)
+            }
             if (now - lastBoxesAt > 500 && persons != 0) {
                 persons = 0
                 listener?.onBoxes(emptyList())
             }
-            listener?.onState(LinkState(phase, fps, rttMs, if (phase != Phase.LIVE && phase != Phase.STALLED) null else piStatus, persons, demo))
+            listener?.onState(LinkState(phase, fps, rttMs, if (phase != Phase.LIVE && phase != Phase.STALLED) null else piStatus, persons, demo, bleNote))
             main.postDelayed(this, 250)
         }
     }

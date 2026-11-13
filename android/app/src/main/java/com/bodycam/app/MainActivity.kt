@@ -75,6 +75,10 @@ class MainActivity : Activity(), LinkService.Listener {
         applyOrientation()
         buildUi()
         hideSystemBars()
+        if (android.os.Build.VERSION.SDK_INT >= 31) { // Bluetooth Wi-Fi recovery
+            val perms = arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT)
+            if (perms.any { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }) requestPermissions(perms, 1)
+        }
         val intent = Intent(this, LinkService::class.java)
         startForegroundService(intent)
         bindService(intent, conn, Context.BIND_AUTO_CREATE)
@@ -399,7 +403,7 @@ class MainActivity : Activity(), LinkService.Listener {
             LinkService.Phase.NO_PI -> "NO PI  SRCH $net" to AMBER
             LinkService.Phase.NO_WIFI -> "NO LINK  SRCH $net" to RED
         }
-        statusText.text = text
+        statusText.text = if (state.bleNote != null) "$text\n${state.bleNote}" else text
         statusText.setTextColor(c(color))
         overlay.stale = state.phase != LinkService.Phase.LIVE
 
