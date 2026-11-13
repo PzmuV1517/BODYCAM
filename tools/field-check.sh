@@ -32,12 +32,12 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o Serve
 
   echo; echo "######## 5/5 WI-FI / BLUETOOTH / THERMAL"
   ssh "${SSH_OPTS[@]}" admin@$HOST '
-    iw dev wlan0 info | grep -E "ssid|type|channel|txpower"
+    /usr/sbin/iw dev wlan0 info | grep -E "ssid|type|channel|txpower"
     echo "-- connected stations:"
-    iw dev wlan0 station dump | grep -E "Station|signal:|tx bitrate|rx bitrate|tx failed|tx retries|inactive"
+    /usr/sbin/iw dev wlan0 station dump | grep -E "Station|signal:|tx bitrate|rx bitrate|tx failed|tx retries|inactive"
     echo "-- bluetooth:"; bluetoothctl show 2>/dev/null | grep -E "Name|Powered|Advertising" || echo "bluetoothctl not available"
     echo "-- temp $(( $(cat /sys/class/thermal/thermal_zone0/temp) / 1000 )) C, fan $(cat /sys/devices/platform/cooling_fan/hwmon/*/fan1_input 2>/dev/null || echo ?) rpm, throttled=$(vcgencmd get_throttled 2>/dev/null)"'
 
   echo; echo "######## DONE $(date)"
 } 2>&1 | tee "$OUT"
-echo; echo "Saved to $(pwd)/$OUT. Switch back to your normal Wi-Fi and tell Claude."
+echo; echo "Saved to $(pwd)/$OUT. Switch back to your normal Wi-Fi when done."
