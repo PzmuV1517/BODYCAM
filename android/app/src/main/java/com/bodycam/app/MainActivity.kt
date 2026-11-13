@@ -301,6 +301,11 @@ class MainActivity : Activity(), LinkService.Listener {
         val flip = CheckBox(this).apply { isChecked = prefs().getBoolean(KEY_FLIP, false) }
         val videoFlip = CheckBox(this).apply { isChecked = s.videoFlip }
         val demo = CheckBox(this).apply { isChecked = s.demo }
+        val piFan = s.piFanIndicator
+        val fanStart = CheckBox(this).apply {
+            isChecked = piFan ?: false
+            isEnabled = piFan != null // setting lives on the Pi: needs a link
+        }
         val piWifi = outlined("SET", Color.LTGRAY)
         val shutdown = outlined("SHUT DOWN", Color.rgb(230, 60, 60))
         val revert = { videoOffset = startOffset; applyOffset() }
@@ -316,6 +321,7 @@ class MainActivity : Activity(), LinkService.Listener {
                     row("FLIP 180", flip, "Rotates the whole display 180 degrees to match the phone mount."),
                     row("VIDEO FLIP", videoFlip, "Rotates only the video 180 degrees. Use when the camera is mounted upside down."),
                     row("DEMO", demo, "Simulated feed and contacts for training. Stops the network search."),
+                    row("FAN START", fanStart, "Pi spins its fan in two short bursts when its Wi-Fi is up after power-on, so you can hear it is ready. Stored on the Pi. Requires an active link to change."),
                     row("PI WI-FI", piWifi, "Changes the SSID and password broadcast by the Pi. Requires an active link."),
                     row("LINK", shutdown, "Stops the link, alerts and background service. Reopen the app to restart."),
                 )
@@ -325,6 +331,7 @@ class MainActivity : Activity(), LinkService.Listener {
                 applyOrientation()
                 s.saveSettings(ssid.text.toString(), pass.text.toString(), host.text.toString())
                 s.setDemo(demo.isChecked)
+                if (piFan != null && fanStart.isChecked != piFan) s.setFanIndicator(fanStart.isChecked)
                 s.videoFlip = videoFlip.isChecked
                 refresh()
             }
@@ -397,7 +404,8 @@ class MainActivity : Activity(), LinkService.Listener {
                     else -> "  DET OFF"
                 }
                 val tag = if (state.demo) "DEMO" else "LINK UP"
-                "$tag  ${state.fps}FPS  ${state.rttMs}MS$det  ${pi?.tempC ?: 0}C" to GREEN
+                val dly = state.delayMs?.let { "  DLY ${it}MS" } ?: ""
+                "$tag  ${state.fps}FPS$dly  ${state.rttMs}MS$det  ${pi?.tempC ?: 0}C" to GREEN
             }
             LinkService.Phase.STALLED -> "LINK DEGRADED  RESYNC" to AMBER
             LinkService.Phase.NO_PI -> "NO PI  SRCH $net" to AMBER

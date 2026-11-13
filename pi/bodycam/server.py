@@ -29,6 +29,8 @@ from fractions import Fraction
 import av
 import numpy as np
 
+import fan
+
 try:  # PyAV >= 12
     from av.video.frame import PictureType
     I_FRAME = PictureType.I
@@ -47,11 +49,18 @@ PKT_SET_WIFI = 0x12   # u8 type, u32 req_id, u8 ssid_len, ssid, u8 pass_len, pas
 PKT_WIFI_ACK = 0x04   # u8 type, u32 req_id, u8 ok, u8 msg_len, msg
 AP_CONNECTION = "bodycam-ap"  # NetworkManager profile created by setup-ap.sh
 
-VIDEO_HDR = struct.Struct("!BIHHB")     # type, frame_id, chunk_idx, chunk_count, flags(bit0=keyframe)
+VIDEO_HDR = struct.Struct("!BIHHBI")    # type, frame_id, chunk_idx, chunk_count, flags(bit0=keyframe), capture_ms
 DETECT_HDR = struct.Struct("!BIBB")     # type, frame_id, ai_enabled, count
 BOX = struct.Struct("!HHHHB")           # x1, y1, x2, y2 (0..65535 of frame), score (0..255)
-STATUS = struct.Struct("!BIBBBBB")      # type, echoed seq, ai_enabled, hailo_ok, enc_fps, infer_fps, cpu_temp_c
+# type, echoed seq, ai_enabled, hailo_ok, enc_fps, infer_fps, cpu_temp_c, pi_now_ms, fan_indicator
+STATUS = struct.Struct("!BIBBBBBIB")
 HELLO = struct.Struct("!BIB")           # type, seq, want_ai (0=off, 1=on, 255=don't care)
+HELLO_FAN = struct.Struct("!BIBB")      # + want_fan_indicator (0/1/255), newer clients
+
+
+def now_ms():
+    """CLOCK_MONOTONIC in ms (same clock as the camera's SensorTimestamp), as u32."""
+    return (time.monotonic_ns() // 1_000_000) & 0xFFFFFFFF
 
 MAX_PAYLOAD = 1200                      # stays under any sane MTU, no IP fragmentation
 TOS_VIDEO = 0xB8                        # DSCP EF -> Wi-Fi WMM video access category
@@ -142,6 +151,7 @@ class State:
         self.running = True
         self.ai_enabled = args.ai_default
         self.hailo_ok = False
+        self.fan_indicator = fan.indicator_enabled()
         self.force_idr = threading.Event()
         self.last_idr = 0.0
         self.last_frame = time.monotonic()
@@ -177,6 +187,7 @@ def cpu_temp():
 def net_loop(st):
     sock = st.link.sock
     last_want = {}
+    last_fan = {}
     while st.running:
         r, _, _ = select.select([sock], [], [], 0.5)
         if not r:
@@ -193,6 +204,14 @@ def net_loop(st):
             if st.link.touch(addr):
                 st.force_idr.set()
                 last_want.pop(addr, None)
+                last_fan.pop(addr, None)
+            want_fan = data[6] if len(data) >= HELLO_FAN.size else 255
+            if want_fan in (0, 1) and last_fan.get(addr) != want_fan:
+                last_fan[addr] = want_fan
+                if bool(want_fan) != st.fan_indicator:
+                    st.fan_indicator = bool(want_fan)
+                    fan.save_setting("fan_indicator", st.fan_indicator)
+                    log.info("fan startup signal %s (by %s)", "ON" if st.fan_indicator else "OFF", addr[0])
             # Apply a viewer's AI wish only when it changes, so two viewers don't fight.
             if want_ai in (0, 1) and last_want.get(addr) != want_ai:
                 last_want[addr] = want_ai
@@ -200,7 +219,8 @@ def net_loop(st):
                     st.ai_enabled = bool(want_ai)
                     log.info("AI %s (by %s)", "ON" if st.ai_enabled else "OFF", addr[0])
             st.link.send(STATUS.pack(PKT_STATUS, seq, st.ai_enabled, st.hailo_ok,
-                                     min(st.enc_fps, 255), min(st.infer_fps, 255), cpu_temp()), addr)
+                                     min(st.enc_fps, 255), min(st.infer_fps, 255), cpu_temp(),
+                                     now_ms(), st.fan_indicator), addr)
         elif kind == PKT_SET_WIFI:
             handle_set_wifi(st, data, addr)
         elif kind == PKT_KEYFRAME_REQ:
@@ -260,6 +280,26 @@ def handle_set_wifi(st, data, addr):
     threading.Thread(target=apply, daemon=True).start()
 
 
+def startup_signal():
+    """Once per boot: when the AP is up, two fan bursts so you can hear the BodyCam is ready."""
+    marker = "/run/bodycam-fan-signalled"
+    if os.path.exists(marker):
+        return
+    for _ in range(180):
+        if fan.ap_active():
+            break
+        time.sleep(1)
+    else:
+        return
+    open(marker, "w").close()
+    if fan.indicator_enabled():
+        log.info("AP up: fan startup signal")
+        try:
+            fan.pulse()
+        except Exception:
+            log.exception("fan startup signal failed")
+
+
 # ---------------------------------------------------------------- video
 def make_encoder(a):
     kbps = a.bitrate
@@ -297,14 +337,14 @@ def pack_yuv420(arr, w, h):
     return np.concatenate([y.ravel(), u.ravel(), v.ravel()]).reshape(h * 3 // 2, w)
 
 
-def send_video(link, frame_id, data, keyframe):
+def send_video(link, frame_id, data, keyframe, capture_ms):
     targets = link.viewers()
     count = (len(data) + MAX_PAYLOAD - 1) // MAX_PAYLOAD
     flags = 1 if keyframe else 0
     for i in range(count):
         if not targets:
             return
-        pkt = VIDEO_HDR.pack(PKT_VIDEO, frame_id, i, count, flags) + data[i * MAX_PAYLOAD:(i + 1) * MAX_PAYLOAD]
+        pkt = VIDEO_HDR.pack(PKT_VIDEO, frame_id, i, count, flags, capture_ms) + data[i * MAX_PAYLOAD:(i + 1) * MAX_PAYLOAD]
         # a viewer that fails mid-frame is skipped for the rest of it; it will ask for a keyframe
         targets = [a for a in targets if link.send(pkt, a)]
         if i % 8 == 7:
@@ -321,7 +361,7 @@ def encoder_loop(st):
         item = st.video_slot.get(timeout=1.0)
         if item is None:
             continue
-        n, yuv = item
+        n, yuv, capture_ms = item
         frame = av.VideoFrame.from_ndarray(pack_yuv420(yuv, a.width, a.height), format="yuv420p")
         frame.pts = n
         if st.force_idr.is_set():
@@ -330,7 +370,7 @@ def encoder_loop(st):
             frame.pict_type = I_FRAME
         for pkt in enc.encode(frame):
             seq += 1
-            send_video(st.link, seq & 0xFFFFFFFF, bytes(pkt), pkt.is_keyframe)
+            send_video(st.link, seq & 0xFFFFFFFF, bytes(pkt), pkt.is_keyframe, capture_ms)
         frames += 1
         now = time.monotonic()
         if now - t0 >= 1.0:
@@ -505,6 +545,7 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
+    threading.Thread(target=startup_signal, daemon=True).start()
     threads = [threading.Thread(target=net_loop, args=(st,), daemon=True),
                threading.Thread(target=encoder_loop, args=(st,), daemon=True),
                threading.Thread(target=watchdog_loop, args=(st,), daemon=True)]
@@ -520,13 +561,18 @@ def main():
         try:
             yuv = req.make_array("main")
             rgb = req.make_array("lores") if lores_size else None
+            sensor_ns = req.get_metadata().get("SensorTimestamp")
         finally:
             req.release()
+        # Capture time for the phone's delay readout: sensor exposure timestamp (CLOCK_MONOTONIC).
+        capture_ms = now_ms()
+        if sensor_ns and abs(time.monotonic_ns() - sensor_ns) < 1_000_000_000:
+            capture_ms = (sensor_ns // 1_000_000) & 0xFFFFFFFF
         n += 1
         st.last_frame = time.monotonic()
         if not st.link.viewers():
             continue  # nobody watching: don't burn CPU/heat encoding
-        st.video_slot.put((n, yuv))
+        st.video_slot.put((n, yuv, capture_ms))
         if rgb is not None and st.ai_enabled and st.hailo_ok:
             st.ai_slot.put((n, rgb))
 

@@ -52,7 +52,7 @@ PS4='    + '
 trap 'echo "    !!! remote command failed (exit $?) at line $LINENO: $BASH_COMMAND"' ERR
 set -x
 sudo install -d /opt/bodycam
-sudo install -m 755 ~/pi/bodycam/server.py ~/pi/bodycam/ble.py /opt/bodycam/
+sudo install -m 755 ~/pi/bodycam/server.py ~/pi/bodycam/ble.py ~/pi/bodycam/fan.py /opt/bodycam/
 sudo rm -rf /opt/bodycam/vendor
 sudo cp -r ~/pi/bodycam/vendor /opt/bodycam/vendor
 sudo install -m 644 ~/pi/bodycam.service ~/pi/bodycam-ble.service /etc/systemd/system/

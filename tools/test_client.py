@@ -11,7 +11,7 @@ import struct
 import sys
 import time
 
-VIDEO_HDR = struct.Struct("!BIHHB")
+VIDEO_HDR = struct.Struct("!BIHHBI")
 DETECT_HDR = struct.Struct("!BIBB")
 BOX = struct.Struct("!HHHHB")
 STATUS = struct.Struct("!BIBBBBB")
@@ -52,7 +52,7 @@ while time.monotonic() - start < duration:
         continue
     t = data[0]
     if t == 0x01:
-        _, fid, idx, cnt, flags = VIDEO_HDR.unpack_from(data)
+        _, fid, idx, cnt, flags, _cap = VIDEO_HDR.unpack_from(data)
         parts = frames.setdefault(fid, [None] * cnt)
         parts[idx] = data[VIDEO_HDR.size:]
         if all(p is not None for p in parts):

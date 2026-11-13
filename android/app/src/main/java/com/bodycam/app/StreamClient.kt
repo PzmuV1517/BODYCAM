@@ -23,12 +23,18 @@ class StreamClient(
     private val cb: Callbacks,
 ) {
     interface Callbacks {
-        fun onFrame(data: ByteArray, key: Boolean) // rx thread
+        fun onFrame(data: ByteArray, key: Boolean, captureMs: Long) // rx thread
         fun onDetections(boxes: List<Box>)         // rx thread
         fun onStatus(status: PiStatus, rttMs: Int) // rx thread
     }
 
     @Volatile var wantAi = true
+    @Volatile var wantFan = 255 // 0/1 while the user is changing the Pi's fan signal setting
+
+    /** Pi clock minus phone clock (elapsedRealtime), ms mod 2^32; from the fastest status replies. */
+    @Volatile var clockOffsetMs: Long? = null
+        private set
+    private val offsetSamples = ArrayDeque<Pair<Int, Long>>() // (rtt, offset)
     @Volatile private var running = true
     @Volatile private var needKey = true
     @Volatile private var lastKeyReq = 0L
@@ -84,7 +90,7 @@ class StreamClient(
             try {
                 seq++
                 sentAt[seq and 63] = SystemClock.elapsedRealtime()
-                val hello = Proto.hello(seq, wantAi)
+                val hello = Proto.hello(seq, wantAi, wantFan)
                 socket.send(DatagramPacket(hello, hello.size, addr, port))
                 val now = SystemClock.elapsedRealtime()
                 wifiReq?.let { r ->
@@ -124,7 +130,7 @@ class StreamClient(
                 when (Proto.u8(buf, 0)) {
                     Proto.VIDEO -> if (n > Proto.VIDEO_HDR) onVideo(buf, n)
                     Proto.DETECT -> if (n >= Proto.DETECT_HDR) onDetect(buf, n)
-                    Proto.STATUS -> if (n >= Proto.STATUS_SIZE) onStatus(buf)
+                    Proto.STATUS -> if (n >= Proto.STATUS_SIZE) onStatus(buf, n)
                     Proto.WIFI_ACK -> if (n >= 7) onWifiAck(buf, n)
                 }
             } catch (e: Exception) {
@@ -139,6 +145,7 @@ class StreamClient(
         val count = Proto.u16(b, 7)
         val key = (Proto.u8(b, 9) and 1) != 0
         if (count == 0 || idx >= count) return
+        val captureMs = Proto.u32(b, 10)
 
         if (id != curId) {
             if (id < curId && curId - id < 1000 && !key) return // late packet of an old frame (keyframes always win: Pi may have restarted)
@@ -165,7 +172,7 @@ class StreamClient(
         for (p in parts) {
             System.arraycopy(p!!, 0, frame, o, p.size); o += p.size
         }
-        cb.onFrame(frame, curKey)
+        cb.onFrame(frame, curKey, captureMs)
     }
 
     private fun lost() {
@@ -196,9 +203,21 @@ class StreamClient(
         r.done(Proto.u8(b, 5) == 1, String(b, 7, len))
     }
 
-    private fun onStatus(b: ByteArray) {
+    private fun onStatus(b: ByteArray, n: Int) {
         val seq = Proto.u32(b, 1).toInt()
-        val rtt = (SystemClock.elapsedRealtime() - sentAt[seq and 63]).toInt().coerceIn(0, 9999)
+        val recv = SystemClock.elapsedRealtime()
+        val rtt = (recv - sentAt[seq and 63]).toInt().coerceIn(0, 9999)
+        var fanInd: Boolean? = null
+        if (n >= Proto.STATUS_EXT) {
+            // Clock sync: Pi time at reply ~= phone time at receive - rtt/2. Keep the sample with
+            // the smallest RTT (least queueing) out of the last 50.
+            val piNow = Proto.u32(b, 10)
+            val offset = (piNow + rtt / 2 - recv) and 0xFFFFFFFFL
+            offsetSamples.addLast(rtt to offset)
+            if (offsetSamples.size > 50) offsetSamples.removeFirst()
+            clockOffsetMs = offsetSamples.minBy { it.first }.second
+            fanInd = Proto.u8(b, 14) != 0
+        }
         cb.onStatus(
             PiStatus(
                 aiEnabled = Proto.u8(b, 5) != 0,
@@ -206,6 +225,7 @@ class StreamClient(
                 encFps = Proto.u8(b, 7),
                 inferFps = Proto.u8(b, 8),
                 tempC = Proto.u8(b, 9),
+                fanIndicator = fanInd,
             ),
             rtt,
         )

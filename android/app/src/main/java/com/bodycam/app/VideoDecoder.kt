@@ -3,6 +3,7 @@ package com.bodycam.app
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.util.concurrent.ArrayBlockingQueue
@@ -19,18 +20,21 @@ class VideoDecoder(
     private val rotation: Int, // 0 or 180, applied by the codec at no cost
     private val onNeedKeyframe: () -> Unit,
     private val onVideoSize: (Int, Int) -> Unit,
+    /** (captureMs, displayedAt in elapsedRealtime ms) for each frame that reached the screen. */
+    private val onDisplayed: (Long, Long) -> Unit,
 ) {
-    private class Frame(val data: ByteArray, val key: Boolean)
+    private class Frame(val data: ByteArray, val key: Boolean, val captureMs: Long)
+    @Volatile private var lastRenderCallback = 0L
 
     private val queue = ArrayBlockingQueue<Frame>(6)
     @Volatile private var running = true
     @Volatile private var waitKey = true
     private val worker = thread(name = "bodycam-decoder", isDaemon = true) { loop() }
 
-    fun submit(data: ByteArray, key: Boolean) {
+    fun submit(data: ByteArray, key: Boolean, captureMs: Long) {
         if (waitKey && !key) return
         if (key) waitKey = false
-        if (!queue.offer(Frame(data, key))) { // decoder is behind: drop all, resync, stay live
+        if (!queue.offer(Frame(data, key, captureMs))) { // decoder is behind: drop all, resync, stay live
             queue.clear()
             waitKey = true
             onNeedKeyframe()
@@ -63,13 +67,18 @@ class VideoDecoder(
             if (Build.VERSION.SDK_INT >= 30) plain.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             codec.configure(plain, surface, null, 0)
         }
+        // Exact on-screen time of each frame (System.nanoTime base) -> delay readout.
+        codec.setOnFrameRenderedListener({ _, ptsUs, nanoTime ->
+            lastRenderCallback = SystemClock.elapsedRealtime()
+            val bootMs = (nanoTime + (SystemClock.elapsedRealtimeNanos() - System.nanoTime())) / 1_000_000
+            onDisplayed(ptsUs / 1000, bootMs)
+        }, android.os.Handler(android.os.Looper.getMainLooper()))
         codec.start()
         return codec
     }
 
     private fun loop() {
         val info = MediaCodec.BufferInfo()
-        var pts = 0L
         while (running) {
             var codec: MediaCodec? = null
             try {
@@ -85,8 +94,8 @@ class VideoDecoder(
                             val buf = codec.getInputBuffer(idx)!!
                             buf.clear()
                             buf.put(f.data)
-                            pts += 33_333
-                            codec.queueInputBuffer(idx, 0, f.data.size, pts, 0)
+                            // pts carries the Pi capture time; it comes back with the rendered frame
+                            codec.queueInputBuffer(idx, 0, f.data.size, f.captureMs * 1000, 0)
                         } else {
                             queue.clear(); waitKey = true; onNeedKeyframe()
                         }
@@ -94,7 +103,12 @@ class VideoDecoder(
                     while (true) {
                         val out = codec.dequeueOutputBuffer(info, 0)
                         when {
-                            out >= 0 -> codec.releaseOutputBuffer(out, true)
+                            out >= 0 -> {
+                                codec.releaseOutputBuffer(out, true)
+                                // Fallback if this decoder never reports render times: ~1 vsync later.
+                                val now = SystemClock.elapsedRealtime()
+                                if (now - lastRenderCallback > 2000) onDisplayed(info.presentationTimeUs / 1000, now + 16)
+                            }
                             out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                                 val of = codec.outputFormat
                                 val w = of.getInteger(MediaFormat.KEY_WIDTH)

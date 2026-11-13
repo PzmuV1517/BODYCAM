@@ -16,7 +16,7 @@ sed -i '/fan_temp/d;/BODYCAM quiet fan/d;/^# Off below 65C/d' "$CFG"
 cat "$DIR/fan-quiet.conf" >> "$CFG"
 
 install -d /opt/bodycam
-install -m 755 "$DIR/bodycam/server.py" "$DIR/bodycam/ble.py" /opt/bodycam/
+install -m 755 "$DIR/bodycam/server.py" "$DIR/bodycam/ble.py" "$DIR/bodycam/fan.py" /opt/bodycam/
 rm -rf /opt/bodycam/vendor && cp -r "$DIR/bodycam/vendor" /opt/bodycam/vendor
 install -m 644 "$DIR/bodycam.service" "$DIR/bodycam-ble.service" /etc/systemd/system/
 

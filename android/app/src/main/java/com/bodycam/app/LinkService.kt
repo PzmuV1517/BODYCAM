@@ -40,6 +40,7 @@ class LinkService : Service() {
         val persons: Int,
         val demo: Boolean,
         val bleNote: String?,
+        val delayMs: Int?, // how old the picture on screen is (capture -> display)
     )
 
     interface Listener {
@@ -95,6 +96,38 @@ class LinkService : Service() {
     private var lastAlertAt = 0L
     private var alertedCount = 0
     @Volatile private var persons = 0
+    private val delays = ArrayDeque<Long>()
+    @Volatile private var lastDelayAt = 0L
+    private var fanWishReset: Runnable? = null
+
+    /** Pi's fan startup signal setting as last reported (null = unknown / not connected). */
+    val piFanIndicator: Boolean? get() = piStatus?.fanIndicator
+
+    fun setFanIndicator(on: Boolean) {
+        val c = client ?: return
+        c.wantFan = if (on) 1 else 0 // sent in every HELLO for a few seconds, then back to "leave it"
+        fanWishReset?.let { main.removeCallbacks(it) }
+        fanWishReset = Runnable { client?.wantFan = 255 }.also { main.postDelayed(it, 3000) }
+    }
+
+    private fun onDisplayed(captureMs: Long, displayedAt: Long) {
+        val offset = client?.clockOffsetMs ?: return
+        val d = Proto.diffU32((displayedAt + offset) and 0xFFFFFFFFL, captureMs)
+        if (d !in 0..10_000) return
+        synchronized(delays) {
+            delays.addLast(d)
+            if (delays.size > 30) delays.removeFirst()
+        }
+        lastDelayAt = SystemClock.elapsedRealtime()
+    }
+
+    private fun delayMedian(): Int? {
+        if (SystemClock.elapsedRealtime() - lastDelayAt > 1500) return null
+        synchronized(delays) {
+            if (delays.isEmpty()) return null
+            return delays.sorted()[delays.size / 2].toInt()
+        }
+    }
 
     var aiEnabled: Boolean
         get() = prefs.getBoolean(KEY_AI, true)
@@ -226,9 +259,9 @@ class LinkService : Service() {
         try {
             while (demo) {
                 val now = SystemClock.elapsedRealtime()
-                rxCallbacks.onFrame(EMPTY, false) // counts as a frame for fps/LIVE
+                rxCallbacks.onFrame(EMPTY, false, 0) // counts as a frame for fps/LIVE
                 if (tick % 2 == 0 && aiEnabled) rxCallbacks.onDetections(DemoScene.at(now))
-                if (tick % 3 == 0) rxCallbacks.onStatus(PiStatus(aiEnabled, true, 30, if (aiEnabled) 30 else 0, 48), 3)
+                if (tick % 3 == 0) rxCallbacks.onStatus(PiStatus(aiEnabled, true, 30, if (aiEnabled) 30 else 0, 48, null), 3)
                 tick++
                 Thread.sleep(33)
             }
@@ -250,6 +283,7 @@ class LinkService : Service() {
                     rotation = if (videoFlip) 180 else 0,
                     onNeedKeyframe = { client?.requestKeyframe() },
                     onVideoSize = { w, h -> main.post { listener?.onVideoSize(w, h) } },
+                    onDisplayed = ::onDisplayed,
                 )
             }
         }
@@ -257,10 +291,10 @@ class LinkService : Service() {
 
     // ------------------------------------------------------------------ rx callbacks
     private val rxCallbacks = object : StreamClient.Callbacks {
-        override fun onFrame(data: ByteArray, key: Boolean) {
+        override fun onFrame(data: ByteArray, key: Boolean, captureMs: Long) {
             lastFrameAt = SystemClock.elapsedRealtime()
             framesThisSecond++
-            if (data.isNotEmpty()) decoder?.submit(data, key)
+            if (data.isNotEmpty()) decoder?.submit(data, key, captureMs)
         }
 
         override fun onDetections(boxes: List<Box>) {
@@ -345,7 +379,7 @@ class LinkService : Service() {
                 persons = 0
                 listener?.onBoxes(emptyList())
             }
-            listener?.onState(LinkState(phase, fps, rttMs, if (phase != Phase.LIVE && phase != Phase.STALLED) null else piStatus, persons, demo, bleNote))
+            listener?.onState(LinkState(phase, fps, rttMs, if (phase != Phase.LIVE && phase != Phase.STALLED) null else piStatus, persons, demo, bleNote, if (demo) null else delayMedian()))
             main.postDelayed(this, 250)
         }
     }

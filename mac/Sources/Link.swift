@@ -13,7 +13,7 @@ enum Proto {
     static let hello: UInt8 = 0x10
     static let keyReq: UInt8 = 0x11
     static let setWifi: UInt8 = 0x12
-    static let videoHdr = 10
+    static let videoHdr = 14   // + u32 capture_ms
     static let detectHdr = 7
     static let boxSize = 9
 
@@ -22,7 +22,9 @@ enum Proto {
         UInt32(b[o]) << 24 | UInt32(b[o + 1]) << 16 | UInt32(b[o + 2]) << 8 | UInt32(b[o + 3])
     }
     static func be32(_ v: UInt32) -> [UInt8] { [UInt8(v >> 24 & 0xFF), UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] }
-    static func helloPacket(_ seq: UInt32, _ wantAi: Bool) -> [UInt8] { [hello] + be32(seq) + [wantAi ? 1 : 0] }
+    static func helloPacket(_ seq: UInt32, _ wantAi: Bool, _ wantFan: UInt8) -> [UInt8] { [hello] + be32(seq) + [wantAi ? 1 : 0, wantFan] }
+    /// Signed a - b of two u32 ms clocks.
+    static func diffU32(_ a: UInt32, _ b: UInt32) -> Int64 { Int64(Int32(bitPattern: a &- b)) }
     static func setWifiPacket(_ id: UInt32, _ ssid: String, _ pass: String) -> [UInt8] {
         let s = Array(ssid.utf8), p = Array(pass.utf8)
         return [setWifi] + be32(id) + [UInt8(s.count)] + s + [UInt8(p.count)] + p
@@ -32,14 +34,14 @@ enum Proto {
 /// Person box, coordinates 0..1 of the video frame.
 struct Box { let x1, y1, x2, y2, score: CGFloat }
 
-struct PiStatus { let aiEnabled, hailoOk: Bool; let encFps, inferFps, tempC: Int }
+struct PiStatus { let aiEnabled, hailoOk: Bool; let encFps, inferFps, tempC: Int; var fanIndicator: Bool? = nil }
 
 func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
 
 /// UDP link to the Pi: HELLO at 10 Hz, frame reassembly, keyframe resync, detections, status.
 final class StreamClient {
     struct Callbacks {
-        let onFrame: ([UInt8], Bool) -> Void      // rx thread
+        let onFrame: ([UInt8], Bool, UInt32) -> Void  // rx thread (data, key, captureMs)
         let onDetections: ([Box]) -> Void         // rx thread
         let onStatus: (PiStatus, Int) -> Void     // rx thread
     }
@@ -51,6 +53,9 @@ final class StreamClient {
     private let lock = NSLock()
     private var running = true
     private var _wantAi = true
+    private var _wantFan: UInt8 = 255
+    private var offsetSamples: [(rtt: Int, offset: UInt32)] = []
+    private var _clockOffset: UInt32?
     private var needKey = true
     private var lastKeyReq = 0.0
     private var sentAt = [Double](repeating: 0, count: 64)
@@ -68,6 +73,12 @@ final class StreamClient {
         set { lock.withLock { _wantAi = newValue } }
     }
     private var isRunning: Bool { lock.withLock { running } }
+    var wantFan: UInt8 {
+        get { lock.withLock { _wantFan } }
+        set { lock.withLock { _wantFan = newValue } }
+    }
+    /// Pi clock minus this Mac's uptime clock, ms mod 2^32 (from the fastest status replies).
+    var clockOffsetMs: UInt32? { lock.withLock { _clockOffset } }
 
     init(host: String, port: UInt16, cb: Callbacks) {
         self.host = host
@@ -135,13 +146,13 @@ final class StreamClient {
             if var a = addr {
                 seq &+= 1
                 let now = uptime()
-                let (ai, req, key): (Bool, (id: UInt32, packet: [UInt8], deadline: Double, done: (Bool, String) -> Void)?, Bool) = lock.withLock {
+                let (ai, fanWish, req, key): (Bool, UInt8, (id: UInt32, packet: [UInt8], deadline: Double, done: (Bool, String) -> Void)?, Bool) = lock.withLock {
                     sentAt[Int(seq & 63)] = now
                     var k = false
                     if needKey && now - lastKeyReq > 0.3 { lastKeyReq = now; k = true }
-                    return (_wantAi, wifiReq, k)
+                    return (_wantAi, _wantFan, wifiReq, k)
                 }
-                send(Proto.helloPacket(seq, ai), &a)
+                send(Proto.helloPacket(seq, ai, fanWish), &a)
                 if let r = req {
                     if now > r.deadline {
                         lock.withLock { wifiReq = nil }
@@ -180,6 +191,7 @@ final class StreamClient {
         let count = Proto.u16(b, 7)
         let key = b[9] & 1 != 0
         guard count > 0, idx < count else { return }
+        let captureMs = Proto.u32(b, 10)
         if id != curId {
             if id < curId && curId - id < 1000 && !key { return } // late packet; keyframes win (Pi restart)
             if curId >= 0 && got > 0 && got < parts.count { lost() }
@@ -199,7 +211,7 @@ final class StreamClient {
             return needKey
         }
         if skip { return }
-        cb.onFrame(parts.flatMap { $0! }, curKey)
+        cb.onFrame(parts.flatMap { $0! }, curKey, captureMs)
     }
 
     private func onDetect(_ b: [UInt8]) {
@@ -217,9 +229,21 @@ final class StreamClient {
 
     private func onStatus(_ b: [UInt8]) {
         let seq = Proto.u32(b, 1)
+        let recv = uptime()
         let sent = lock.withLock { sentAt[Int(seq & 63)] }
-        let rtt = max(0, min(9999, Int((uptime() - sent) * 1000)))
-        cb.onStatus(PiStatus(aiEnabled: b[5] != 0, hailoOk: b[6] != 0, encFps: Int(b[7]), inferFps: Int(b[8]), tempC: Int(b[9])), rtt)
+        let rtt = max(0, min(9999, Int((recv - sent) * 1000)))
+        var st = PiStatus(aiEnabled: b[5] != 0, hailoOk: b[6] != 0, encFps: Int(b[7]), inferFps: Int(b[8]), tempC: Int(b[9]))
+        if b.count >= 15 {
+            let piNow = Proto.u32(b, 10)
+            let offset = piNow &+ UInt32(rtt / 2) &- UInt32(truncatingIfNeeded: Int64(recv * 1000))
+            lock.withLock {
+                offsetSamples.append((rtt, offset))
+                if offsetSamples.count > 50 { offsetSamples.removeFirst() }
+                _clockOffset = offsetSamples.min { $0.rtt < $1.rtt }?.offset
+            }
+            st.fanIndicator = b[14] != 0
+        }
+        cb.onStatus(st, rtt)
     }
 
     private func onWifiAck(_ b: [UInt8]) {
@@ -281,7 +305,7 @@ final class WifiJoiner: NSObject, CLLocationManagerDelegate {
 /// Owns the link, stats, demo and alert logic. Main thread only.
 final class LinkModel {
     enum Phase { case noWifi, noPi, stalled, live }
-    struct State { let phase: Phase; let fps: Int; let rttMs: Int; let pi: PiStatus?; let persons: Int; let demo: Bool }
+    struct State { let phase: Phase; let fps: Int; let rttMs: Int; let pi: PiStatus?; let persons: Int; let demo: Bool; let delayMs: Int? }
 
     static let defaultHost = "10.42.0.1"
     private let d = UserDefaults.standard
@@ -302,6 +326,14 @@ final class LinkModel {
     private var rtt = 0, framesThisSecond = 0, fps = 0
     private var fpsWindowStart = 0.0
     private(set) var persons = 0
+    private var delays: [Int64] = []
+    private var lastDelayAt = 0.0
+    var piFanIndicator: Bool? { piStatus?.fanIndicator }
+
+    func setFanIndicator(_ on: Bool) {
+        client?.wantFan = on ? 1 : 0 // sent in HELLOs for a few seconds, then back to "leave it"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.client?.wantFan = 255 }
+    }
 
     private var recentHits = [Bool](repeating: false, count: 5)
     private var hitIdx = 0
@@ -354,7 +386,7 @@ final class LinkModel {
         if demo { return }
         joiner.configure(ssid: ssid, pass: password)
         let c = StreamClient(host: host, port: Proto.port, cb: .init(
-            onFrame: { [weak self] data, key in DispatchQueue.main.async { self?.frame(data, key) } },
+            onFrame: { [weak self] data, key, cap in DispatchQueue.main.async { self?.frame(data, key, cap) } },
             onDetections: { [weak self] boxes in DispatchQueue.main.async { self?.detections(boxes) } },
             onStatus: { [weak self] st, rtt in DispatchQueue.main.async { self?.status(st, rtt) } }
         ))
@@ -390,16 +422,33 @@ final class LinkModel {
     }
 
     private func demoStep() {
-        frame([], false)
+        frame([], false, 0)
         if demoTick % 2 == 0 && aiEnabled { detections(DemoScene.at(uptime())) }
         if demoTick % 3 == 0 { status(PiStatus(aiEnabled: aiEnabled, hailoOk: true, encFps: 30, inferFps: aiEnabled ? 30 : 0, tempC: 48), 3) }
         demoTick += 1
     }
 
-    private func frame(_ data: [UInt8], _ key: Bool) {
+    private func frame(_ data: [UInt8], _ key: Bool, _ captureMs: UInt32) {
         lastFrameAt = uptime()
         framesThisSecond += 1
-        if !data.isEmpty { renderer.submit(data, key: key) }
+        guard !data.isEmpty else { return }
+        renderer.submit(data, key: key)
+        // Delay readout: capture -> hand-off to the display layer, plus ~1 frame for decode/display
+        // (the Mac has no per-frame "on screen" callback like Android).
+        if let off = client?.clockOffsetMs {
+            let piNow = UInt32(truncatingIfNeeded: Int64(uptime() * 1000)) &+ off
+            let d = Proto.diffU32(piNow, captureMs) + 17
+            if (0...10_000).contains(d) {
+                delays.append(d)
+                if delays.count > 30 { delays.removeFirst() }
+                lastDelayAt = uptime()
+            }
+        }
+    }
+
+    private func delayMedian() -> Int? {
+        guard !demo, uptime() - lastDelayAt < 1.5, !delays.isEmpty else { return nil }
+        return Int(delays.sorted()[delays.count / 2])
     }
 
     private func detections(_ boxes: [Box]) {
@@ -469,6 +518,6 @@ final class LinkModel {
         }
         if !demo { joiner.tick(linkUp: phase == .live || phase == .stalled) }
         onState?(State(phase: phase, fps: fps, rttMs: rtt,
-                       pi: (phase == .live || phase == .stalled) ? piStatus : nil, persons: persons, demo: demo))
+                       pi: (phase == .live || phase == .stalled) ? piStatus : nil, persons: persons, demo: demo, delayMs: delayMedian()))
     }
 }

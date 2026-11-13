@@ -139,7 +139,8 @@ final class ScreenView: NSView {
         case .live:
             var det = ""
             if let pi = s.pi { det = !pi.hailoOk ? "  DET FAIL" : pi.aiEnabled ? "  DET \(pi.inferFps)" : "  DET OFF" }
-            text = "\(s.demo ? "DEMO" : "LINK UP")  \(s.fps)FPS  \(s.rttMs)MS\(det)  \(s.pi?.tempC ?? 0)C"
+            let dly = s.delayMs.map { "  DLY \($0)MS" } ?? ""
+            text = "\(s.demo ? "DEMO" : "LINK UP")  \(s.fps)FPS\(dly)  \(s.rttMs)MS\(det)  \(s.pi?.tempC ?? 0)C"
             color = Palette.green
         case .stalled: text = "LINK DEGRADED  RESYNC"; color = Palette.amber
         case .noPi: text = "NO PI  SRCH \(net)"; color = Palette.amber

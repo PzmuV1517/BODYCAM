@@ -11,10 +11,11 @@ object Proto {
     const val SET_WIFI = 0x12
     const val WIFI_ACK = 0x04
 
-    const val VIDEO_HDR = 10   // u8 type, u32 frame_id, u16 idx, u16 count, u8 flags
+    const val VIDEO_HDR = 14   // u8 type, u32 frame_id, u16 idx, u16 count, u8 flags, u32 capture_ms
     const val DETECT_HDR = 7   // u8 type, u32 frame_id, u8 ai, u8 count
     const val BOX_SIZE = 9     // u16 x1, y1, x2, y2, u8 score
     const val STATUS_SIZE = 10 // u8 type, u32 seq, u8 ai, hailo_ok, enc_fps, infer_fps, temp
+    const val STATUS_EXT = 15  // + u32 pi_now_ms, u8 fan_indicator
 
     fun u8(b: ByteArray, o: Int) = b[o].toInt() and 0xFF
     fun u16(b: ByteArray, o: Int) = (u8(b, o) shl 8) or u8(b, o + 1)
@@ -31,11 +32,19 @@ object Proto {
         ) + s + byteArrayOf(p.size.toByte()) + p
     }
 
-    fun hello(seq: Int, wantAi: Boolean) = byteArrayOf(
+    /** wantFan: 0/1 = set the Pi's fan startup signal, 255 = leave it. */
+    fun hello(seq: Int, wantAi: Boolean, wantFan: Int) = byteArrayOf(
         HELLO.toByte(),
         (seq ushr 24).toByte(), (seq ushr 16).toByte(), (seq ushr 8).toByte(), seq.toByte(),
         if (wantAi) 1 else 0,
+        wantFan.toByte(),
     )
+
+    /** Signed difference a - b of two u32 millisecond clocks (handles wrap-around). */
+    fun diffU32(a: Long, b: Long): Long {
+        val d = (a - b) and 0xFFFFFFFFL
+        return if (d >= 0x80000000L) d - 0x100000000L else d
+    }
 }
 
 /** Person box, coordinates 0..1 of the video frame. */
@@ -47,4 +56,5 @@ data class PiStatus(
     val encFps: Int,
     val inferFps: Int,
     val tempC: Int,
+    val fanIndicator: Boolean?, // null = Pi too old to report it
 )

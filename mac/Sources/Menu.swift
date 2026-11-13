@@ -87,6 +87,10 @@ final class MenuController {
         videoFlip.state = model.videoFlip ? .on : .off
         let demo = NSButton(checkboxWithTitle: "", target: nil, action: nil)
         demo.state = model.demo ? .on : .off
+        let piFan = model.piFanIndicator
+        let fanStart = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+        fanStart.state = piFan == true ? .on : .off
+        fanStart.isEnabled = piFan != nil // stored on the Pi: needs a link
         let piWifi = ClosureButton(title: "SET") { [weak self] in
             self?.app.screen.videoOffset = startOffset
             self?.close()
@@ -112,6 +116,7 @@ final class MenuController {
             app.holder.flip = model.flip
             model.saveSettings(ssid: ssid.stringValue, password: pass.stringValue, host: host.stringValue)
             model.setDemo(demo.state == .on)
+            if let piFan, (fanStart.state == .on) != piFan { model.setFanIndicator(fanStart.state == .on) }
             app.screen.refresh()
             close()
         }
@@ -125,6 +130,7 @@ final class MenuController {
             row("FLIP 180", flip, "Rotates the whole display 180 degrees to match the phone mount."),
             row("VIDEO FLIP", videoFlip, "Rotates only the video 180 degrees. Use when the camera is mounted upside down."),
             row("DEMO", demo, "Simulated feed and contacts for training. Stops the network search."),
+            row("FAN START", fanStart, "Pi spins its fan in two short bursts when its Wi-Fi is up after power-on, so you can hear it is ready. Stored on the Pi. Requires an active link to change."),
             row("PI WI-FI", piWifi, "Changes the SSID and password broadcast by the Pi. Requires an active link."),
             row("LINK", shutdown, "Stops the link and alerts and closes the app."),
         ], buttons: [cancel, save])

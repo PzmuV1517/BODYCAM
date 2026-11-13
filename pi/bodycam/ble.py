@@ -10,7 +10,7 @@ Login is challenge/response so the secret never goes over the air:
 The secret is the Pi's Wi-Fi (AP) password, read fresh from NetworkManager on every login.
 
 Commands after login:
-    status | logs [n] | wifi restart | service restart | reboot | sh <command>
+    status | logs [n] | wifi restart | service restart | fan indicator on|off | fan test | reboot | sh <command>
 """
 import asyncio
 import hashlib
@@ -22,6 +22,8 @@ import secrets
 import subprocess
 import sys
 import threading
+
+import fan
 
 # Pure-Python D-Bus (vendored): the Pi has no internet on its own AP, so no apt packages needed.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor"))
@@ -90,11 +92,12 @@ def status():
         temp = int(open("/sys/class/thermal/thermal_zone0/temp").read()) // 1000
     except OSError:
         temp = 0
-    fan = run("cat /sys/devices/platform/cooling_fan/hwmon/*/fan1_input 2>/dev/null", 5)[1].strip() or "?"
+    fan_rpm = run("cat /sys/devices/platform/cooling_fan/hwmon/*/fan1_input 2>/dev/null", 5)[1].strip() or "?"
     up = run(["uptime", "-p"], 5)[1].strip()
     ips = run("hostname -I", 5)[1].strip()
     return (f"ap={'up' if ap_up else 'down'}\nssid={ssid}\nchannel={chan}\nclients={clients}\n"
-            f"service={svc}\ntemp_c={temp}\nfan_rpm={fan}\nuptime={up}\nip={ips}\n")
+            f"service={svc}\ntemp_c={temp}\nfan_rpm={fan_rpm}\nfan_indicator={'on' if fan.indicator_enabled() else 'off'}\n"
+            f"uptime={up}\nip={ips}\n")
 
 
 def handle(session, line):
@@ -126,6 +129,14 @@ def handle(session, line):
         return run(["nmcli", "connection", "up", AP_CONNECTION], 30)
     if cmd == "service" and arg.strip() == "restart":
         return run(["systemctl", "restart", "bodycam"], 30)
+    if cmd == "fan":
+        if arg.strip() in ("indicator on", "indicator off"):
+            fan.save_setting("fan_indicator", arg.strip().endswith("on"))
+            return 0, f"fan startup signal {arg.strip().split()[1]} (video service picks it up on restart)\n"
+        if arg.strip() == "test":
+            fan.pulse()
+            return 0, "fan pulsed twice\n"
+        return 1, "usage: fan indicator on|off | fan test\n"
     if cmd == "reboot":
         threading.Timer(1.0, lambda: os.system("systemctl reboot")).start()
         return 0, "rebooting\n"
