@@ -232,6 +232,7 @@ def encoder_loop(st):
     a = st.args
     enc = make_encoder(a)
     frames, t0 = 0, time.monotonic()
+    seq = 0  # consecutive per encoded frame, so the phone can detect whole lost frames
     while st.running:
         item = st.video_slot.get(timeout=1.0)
         if item is None:
@@ -244,7 +245,8 @@ def encoder_loop(st):
             st.last_idr = time.monotonic()
             frame.pict_type = I_FRAME
         for pkt in enc.encode(frame):
-            send_video(st.link, n & 0xFFFFFFFF, bytes(pkt), pkt.is_keyframe)
+            seq += 1
+            send_video(st.link, seq & 0xFFFFFFFF, bytes(pkt), pkt.is_keyframe)
         frames += 1
         now = time.monotonic()
         if now - t0 >= 1.0:

@@ -64,7 +64,7 @@ stream with an immediate keyframe. If no `HELLO` for 2 s, the Pi stops sending (
 
 | type | layout | meaning |
 |---|---|---|
-| `0x01` VIDEO | `u8 type, u32 frame_id, u16 chunk_idx, u16 chunk_count, u8 flags, payload` | H.264 Annex-B access unit split into ≤1200-byte chunks. `flags` bit0 = keyframe (SPS/PPS included). Missing chunk → drop frame, send KEYFRAME_REQ |
+| `0x01` VIDEO | `u8 type, u32 frame_id, u16 chunk_idx, u16 chunk_count, u8 flags, payload` | H.264 Annex-B access unit split into ≤1200-byte chunks. `frame_id` is consecutive per encoded frame (a gap = a whole frame lost). `flags` bit0 = keyframe (SPS/PPS included). Missing chunk → drop frame, send KEYFRAME_REQ |
 | `0x02` DETECT | `u8 type, u32 frame_id, u8 ai_enabled, u8 count, count × (u16 x1, u16 y1, u16 x2, u16 y2, u8 score)` | person boxes, coords 0..65535 of the frame, score 0..255. Sent per inference only while AI is on (`count` may be 0) |
 | `0x03` STATUS | `u8 type, u32 seq, u8 ai_enabled, u8 hailo_ok, u8 enc_fps, u8 infer_fps, u8 cpu_temp_c` | reply to every HELLO (`seq` echoed → RTT / link alive) |
 
