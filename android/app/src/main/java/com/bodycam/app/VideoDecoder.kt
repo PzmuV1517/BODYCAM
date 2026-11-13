@@ -16,6 +16,7 @@ import kotlin.concurrent.thread
  */
 class VideoDecoder(
     private val surface: Surface,
+    private val rotation: Int, // 0 or 180, applied by the codec at no cost
     private val onNeedKeyframe: () -> Unit,
     private val onVideoSize: (Int, Int) -> Unit,
 ) {
@@ -44,6 +45,7 @@ class VideoDecoder(
     private fun createCodec(): MediaCodec {
         val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1280, 720)
         fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1 shl 20)
+        fmt.setInteger(MediaFormat.KEY_ROTATION, rotation)
         if (Build.VERSION.SDK_INT >= 30) fmt.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         fmt.setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
         // Vendor low-latency switches; ignored where unsupported.
@@ -57,6 +59,7 @@ class VideoDecoder(
             codec.reset()
             val plain = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1280, 720)
             plain.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1 shl 20)
+            plain.setInteger(MediaFormat.KEY_ROTATION, rotation)
             if (Build.VERSION.SDK_INT >= 30) plain.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             codec.configure(plain, surface, null, 0)
         }

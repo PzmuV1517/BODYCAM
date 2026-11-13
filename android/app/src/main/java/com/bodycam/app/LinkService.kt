@@ -98,6 +98,15 @@ class LinkService : Service() {
             client?.wantAi = v
         }
 
+    /** Rotate only the video 180 degrees (camera mounted upside down). */
+    var videoFlip: Boolean
+        get() = prefs.getBoolean(KEY_VIDEO_FLIP, false)
+        set(v) {
+            if (v == videoFlip) return
+            prefs.edit().putBoolean(KEY_VIDEO_FLIP, v).apply()
+            attachDecoder(if (demo) null else surface) // decoder applies the rotation
+        }
+
     var alertsEnabled: Boolean
         get() = prefs.getBoolean(KEY_ALERTS, true)
         set(v) {
@@ -231,6 +240,7 @@ class LinkService : Service() {
             decoder = surface?.let {
                 VideoDecoder(
                     it,
+                    rotation = if (videoFlip) 180 else 0,
                     onNeedKeyframe = { client?.requestKeyframe() },
                     onVideoSize = { w, h -> main.post { listener?.onVideoSize(w, h) } },
                 )
@@ -354,6 +364,7 @@ class LinkService : Service() {
         private const val CHANNEL = "link"
         private const val KEY_AI = "ai"
         private const val KEY_ALERTS = "alerts"
+        private const val KEY_VIDEO_FLIP = "video_flip"
         private const val KEY_SSID = "ssid"
         private const val KEY_PASS = "pass"
         private const val KEY_HOST = "host"

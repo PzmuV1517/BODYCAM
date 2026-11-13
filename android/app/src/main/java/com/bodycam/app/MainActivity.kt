@@ -187,6 +187,9 @@ class MainActivity : Activity(), LinkService.Listener {
         style(nightButton, if (night) "NIGHT ON" else "NIGHT", night)
         style(menuButton, "MENU", false)
         demoView.visibility = if (s?.demo == true) View.VISIBLE else View.GONE
+        val rot = if (s?.videoFlip == true) 180f else 0f // boxes and demo follow the video
+        overlay.rotation = rot
+        demoView.rotation = rot
         overlay.night = night
     }
 
@@ -292,6 +295,7 @@ class MainActivity : Activity(), LinkService.Listener {
             })
         }
         val flip = CheckBox(this).apply { isChecked = prefs().getBoolean(KEY_FLIP, false) }
+        val videoFlip = CheckBox(this).apply { isChecked = s.videoFlip }
         val demo = CheckBox(this).apply { isChecked = s.demo }
         val piWifi = outlined("SET", Color.LTGRAY)
         val shutdown = outlined("SHUT DOWN", Color.rgb(230, 60, 60))
@@ -305,7 +309,8 @@ class MainActivity : Activity(), LinkService.Listener {
                     row("PASSWORD", pass, "WPA2 password of the Pi network."),
                     row("PI ADDRESS", host, "IP address of the Pi. Default ${LinkService.DEFAULT_HOST} on its own network."),
                     row("VIDEO POS", offset, "Moves the video left or right. Left end puts the video on the left edge."),
-                    row("FLIP 180", flip, "Rotates the display 180 degrees to match the mount."),
+                    row("FLIP 180", flip, "Rotates the whole display 180 degrees to match the phone mount."),
+                    row("VIDEO FLIP", videoFlip, "Rotates only the video 180 degrees. Use when the camera is mounted upside down."),
                     row("DEMO", demo, "Simulated feed and contacts for training. Stops the network search."),
                     row("PI WI-FI", piWifi, "Changes the SSID and password broadcast by the Pi. Requires an active link."),
                     row("LINK", shutdown, "Stops the link, alerts and background service. Reopen the app to restart."),
@@ -316,6 +321,7 @@ class MainActivity : Activity(), LinkService.Listener {
                 applyOrientation()
                 s.saveSettings(ssid.text.toString(), pass.text.toString(), host.text.toString())
                 s.setDemo(demo.isChecked)
+                s.videoFlip = videoFlip.isChecked
                 refresh()
             }
             .setNegativeButton("CANCEL") { _, _ -> revert() }
