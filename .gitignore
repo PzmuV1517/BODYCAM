@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .DS_Store
 out.h264
+tools/field-report.txt

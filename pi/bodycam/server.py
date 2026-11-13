@@ -14,6 +14,7 @@ Design goals, in order: live feed always up, instant (re)connect, low latency, t
 See ../README.md for the wire protocol.
 """
 import argparse
+import errno
 import logging
 import os
 import select
@@ -79,40 +80,59 @@ class LatestSlot:
 
 
 class Link:
-    """Tracks the current viewer (last address that sent a HELLO) and sends to it."""
+    """Every address that sent a HELLO in the last `timeout` s is a viewer (phone, Mac, test tool).
+    Video and detections go to all of them."""
 
     def __init__(self, sock, timeout):
         self.sock = sock
         self.timeout = timeout
         self._lock = threading.Lock()
-        self._addr = None
-        self._last_seen = 0.0
+        self._seen = {}  # addr -> last HELLO time
+        self.sent = 0       # stats, logged every 5 s
+        self.retried = 0
+        self.failed = 0
 
     def touch(self, addr):
         """Returns True if this is a new viewer (or one coming back after a timeout)."""
         now = time.monotonic()
         with self._lock:
-            new = addr != self._addr or now - self._last_seen > self.timeout
-            self._addr, self._last_seen = addr, now
+            last = self._seen.get(addr)
+            new = last is None or now - last > self.timeout
+            self._seen[addr] = now
+            for a, t in list(self._seen.items()):
+                if now - t > 10 * self.timeout:
+                    del self._seen[a]
         if new:
             log.info("viewer %s:%d connected", *addr)
         return new
 
-    def target(self):
+    def viewers(self):
+        now = time.monotonic()
         with self._lock:
-            if self._addr and time.monotonic() - self._last_seen < self.timeout:
-                return self._addr
-        return None
+            return [a for a, t in self._seen.items() if now - t < self.timeout]
+
+    def _sendto(self, data, addr):
+        # Socket buffer (EAGAIN) or Wi-Fi driver queue (ENOBUFS) full mid-burst, typical for a big
+        # keyframe on the Pi's own AP: wait a few ms for room instead of dropping the rest of the frame.
+        for attempt in range(4):
+            try:
+                self.sock.sendto(data, addr)
+                self.sent += 1
+                return True
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.ENOBUFS) or attempt == 3:
+                    self.failed += 1
+                    return False
+                self.retried += 1
+                select.select([], [self.sock], [], 0.004)
+        return False
 
     def send(self, data, addr=None):
-        addr = addr or self.target()
-        if not addr:
-            return False
-        try:
-            self.sock.sendto(data, addr)
-            return True
-        except (BlockingIOError, OSError):
-            return False  # buffer full / link down: drop, never block
+        targets = [addr] if addr else self.viewers()
+        ok = False
+        for a in targets:
+            ok = self._sendto(data, a) or ok
+        return ok
 
 
 class State:
@@ -156,6 +176,7 @@ def cpu_temp():
 @fatal_on_error
 def net_loop(st):
     sock = st.link.sock
+    last_want = {}
     while st.running:
         r, _, _ = select.select([sock], [], [], 0.5)
         if not r:
@@ -171,9 +192,13 @@ def net_loop(st):
             _, seq, want_ai = HELLO.unpack_from(data)
             if st.link.touch(addr):
                 st.force_idr.set()
-            if want_ai in (0, 1) and bool(want_ai) != st.ai_enabled:
-                st.ai_enabled = bool(want_ai)
-                log.info("AI %s", "ON" if st.ai_enabled else "OFF")
+                last_want.pop(addr, None)
+            # Apply a viewer's AI wish only when it changes, so two viewers don't fight.
+            if want_ai in (0, 1) and last_want.get(addr) != want_ai:
+                last_want[addr] = want_ai
+                if bool(want_ai) != st.ai_enabled:
+                    st.ai_enabled = bool(want_ai)
+                    log.info("AI %s (by %s)", "ON" if st.ai_enabled else "OFF", addr[0])
             st.link.send(STATUS.pack(PKT_STATUS, seq, st.ai_enabled, st.hailo_ok,
                                      min(st.enc_fps, 255), min(st.infer_fps, 255), cpu_temp()), addr)
         elif kind == PKT_SET_WIFI:
@@ -273,15 +298,17 @@ def pack_yuv420(arr, w, h):
 
 
 def send_video(link, frame_id, data, keyframe):
-    addr = link.target()
-    if not addr:
-        return
+    targets = link.viewers()
     count = (len(data) + MAX_PAYLOAD - 1) // MAX_PAYLOAD
     flags = 1 if keyframe else 0
     for i in range(count):
-        chunk = data[i * MAX_PAYLOAD:(i + 1) * MAX_PAYLOAD]
-        if not link.send(VIDEO_HDR.pack(PKT_VIDEO, frame_id, i, count, flags) + chunk, addr):
-            return  # rest of the frame is useless; phone will ask for a keyframe
+        if not targets:
+            return
+        pkt = VIDEO_HDR.pack(PKT_VIDEO, frame_id, i, count, flags) + data[i * MAX_PAYLOAD:(i + 1) * MAX_PAYLOAD]
+        # a viewer that fails mid-frame is skipped for the rest of it; it will ask for a keyframe
+        targets = [a for a in targets if link.send(pkt, a)]
+        if i % 8 == 7:
+            time.sleep(0.0005)  # pace big keyframes so the Wi-Fi queue isn't flooded in one go
 
 
 @fatal_on_error
@@ -375,8 +402,16 @@ def inference_loop(st, hailo):
 
 # ---------------------------------------------------------------- camera
 def watchdog_loop(st):
+    last_stats = time.monotonic()
     while st.running:
         time.sleep(1)
+        if time.monotonic() - last_stats >= 5:
+            last_stats = time.monotonic()
+            v = st.link.viewers()
+            if v or st.link.failed:
+                log.info("viewers=%s enc_fps=%d infer_fps=%d pkts sent=%d retried=%d failed=%d",
+                         [a[0] for a in v], st.enc_fps, st.infer_fps, st.link.sent, st.link.retried, st.link.failed)
+            st.link.sent = st.link.retried = st.link.failed = 0
         if time.monotonic() - st.last_frame > 5:
             log.error("camera stalled >5s, exiting for restart")
             os._exit(3)
@@ -486,7 +521,7 @@ def main():
             req.release()
         n += 1
         st.last_frame = time.monotonic()
-        if st.link.target() is None:
+        if not st.link.viewers():
             continue  # nobody watching: don't burn CPU/heat encoding
         st.video_slot.put((n, yuv))
         if rgb is not None and st.ai_enabled and st.hailo_ok:
