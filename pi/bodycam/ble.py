@@ -2,7 +2,7 @@
 """BODYCAM BLE console: status, logs, Wi-Fi recovery and a shell over Bluetooth LE.
 
 Nordic UART Service (NUS): the client writes text lines to RX and gets text back as TX
-notifications. Every reply ends with a line "<<END rc>>".
+notifications. Every reply ends with a line "<<END rc nbytes>>" (nbytes = reply length, to detect loss).
 
 Login is challenge/response so the secret never goes over the air:
     HELLO                       -> NONCE <hex>
@@ -197,7 +197,9 @@ class TxChar(ServiceInterface):
         self.notifying = False
 
     def send_threadsafe(self, data, mtu):
-        size = max(20, mtu - 3)
+        # ATT notification payload is MTU-3, but the MTU BlueZ reports can exceed what the link
+        # actually carries (we saw a few bytes cut from each chunk), so keep a safety margin.
+        size = max(20, mtu - 13)
         for i in range(0, len(data), size):
             self.loop.call_soon_threadsafe(self.out.put_nowait, data[i:i + size])
 
@@ -253,7 +255,9 @@ class RxChar(ServiceInterface):
             rc, text = handle(s, line)
             if not text.endswith("\n"):
                 text += "\n"
-            self.tx.send_threadsafe((text + f"<<END {rc}>>\n").encode(), s.mtu)
+            body = text.encode()
+            # byte count lets the client detect lost or cut notifications
+            self.tx.send_threadsafe(body + f"<<END {rc} {len(body)}>>\n".encode(), s.mtu)
 
 
 class Advertisement(ServiceInterface):

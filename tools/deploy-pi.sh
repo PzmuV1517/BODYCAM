@@ -76,6 +76,18 @@ else
   echo "    fan curve changed in $CFG:"
   diff "$CFG" "$NEW" | sed 's/^/      /' || true
   sudo cp "$NEW" "$CFG"; rm -f "$NEW"
+fi
+# config.txt only takes effect at boot; also set the live thresholds now so no reboot is needed.
+TZ=/sys/class/thermal/thermal_zone0
+set -- 65000 72000 78000 82000
+for i in 1 2 3 4; do
+  eval want=\${$i}
+  echo "$want" | sudo tee $TZ/trip_point_${i}_temp >/dev/null 2>&1 || true
+done
+LIVE=$(for i in 1 2 3 4; do printf "%s " $(( $(cat $TZ/trip_point_${i}_temp) / 1000 )); done)
+echo "    fan thresholds now (C): $LIVE  (want: 65 72 78 82)"
+if [ "$LIVE" != "65 72 78 82 " ]; then
+  echo "    live thresholds not writable on this kernel: a reboot will apply config.txt"
   touch /tmp/bodycam-needs-reboot
 fi
 REMOTE

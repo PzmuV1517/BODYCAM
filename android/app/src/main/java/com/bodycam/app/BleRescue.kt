@@ -194,7 +194,7 @@ class BleRescue(private val context: Context, private val report: (String) -> Un
             val j = buf.indexOf(">>\n", i)
             if (j < 0) return
             val text = buf.substring(0, i)
-            val rc = buf.substring(i + 6, j).trim().toIntOrNull() ?: 1
+            val rc = buf.substring(i + 6, j).trim().split(" ").firstOrNull()?.toIntOrNull() ?: 1
             buf.delete(0, j + 3)
             onReply(rc, text)
         }

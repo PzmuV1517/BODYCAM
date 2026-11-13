@@ -36,9 +36,14 @@ class Console:
             j = self.buf.find(b">>\n", i)
             if j < 0:
                 break
-            text, rc = self.buf[:i], int(self.buf[i + 6:j])
+            text = self.buf[:i]
+            parts = self.buf[i + 6:j].split()
+            rc = int(parts[0])
             self.buf = self.buf[j + 3:]
-            self.done.put_nowait((rc, text.decode(errors="replace")))
+            out = text.decode(errors="replace")
+            if len(parts) > 1 and int(parts[1]) != len(text):
+                out += f"\n[BLE WARNING: got {len(text)} of {parts[1]} bytes, output is incomplete]\n"
+            self.done.put_nowait((rc, out))
 
     async def call(self, line, timeout=90):
         data = (line + "\n").encode()
