@@ -33,6 +33,14 @@ class OverlayView(context: Context) : View(context) {
         set(v) { field = v; invalidate() }
     var stale = false
         set(v) { if (v != field) { field = v; invalidate() } }
+    var night = false
+        set(v) {
+            if (v == field) return
+            field = v
+            val col = if (v) Color.rgb(170, 0, 0) else Color.RED
+            boxPaint.color = col; edgePaint.color = col; textPaint.color = col
+            invalidate()
+        }
 
     private val d = resources.displayMetrics.density
     private val boxPaint = Paint().apply { color = Color.RED; style = Paint.Style.STROKE; strokeWidth = 2.5f * d; isAntiAlias = true }

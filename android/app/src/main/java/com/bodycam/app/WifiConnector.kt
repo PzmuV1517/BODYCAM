@@ -19,7 +19,7 @@ import android.util.Log
  *   While we're off Wi-Fi we also kick a scan every 20 s so it's found sooner.
  * - SSID blank: nothing is suggested; we simply use whatever Wi-Fi the phone is on (testing).
  *
- * Either way we hand out the Wi-Fi [Network] so sockets can be bound to it — Android otherwise
+ * Either way we hand out the Wi-Fi [Network] so sockets can be bound to it, Android otherwise
  * routes to mobile data because the Pi's network has no internet.
  */
 class WifiConnector(

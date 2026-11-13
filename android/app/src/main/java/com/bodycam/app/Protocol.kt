@@ -1,6 +1,6 @@
 package com.bodycam.app
 
-/** Wire protocol shared with pi/bodycam/server.py — see pi/README.md. All big-endian. */
+/** Wire protocol shared with pi/bodycam/server.py, see pi/README.md. All big-endian. */
 object Proto {
     const val PORT = 5600
     const val VIDEO = 0x01

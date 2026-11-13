@@ -64,7 +64,7 @@ class DemoView(context: Context) : View(context) {
             c.drawCircle(cx, b.y1 * h + bw * 0.28f, bw * 0.28f, body)
             c.drawRoundRect(cx - bw * 0.5f, b.y1 * h + bw * 0.6f, cx + bw * 0.5f, b.y2 * h, bw * 0.2f, bw * 0.2f, body)
         }
-        c.drawText("DEMO — no camera", w / 2, h * 0.1f, label)
+        c.drawText("DEMO", w / 2, h * 0.1f, label)
         postInvalidateOnAnimation()
     }
 }
