@@ -20,6 +20,7 @@ import select
 import signal
 import socket
 import struct
+import subprocess
 import threading
 import time
 from fractions import Fraction
@@ -41,6 +42,9 @@ PKT_DETECT = 0x02
 PKT_STATUS = 0x03
 PKT_HELLO = 0x10
 PKT_KEYFRAME_REQ = 0x11
+PKT_SET_WIFI = 0x12   # u8 type, u32 req_id, u8 ssid_len, ssid, u8 pass_len, pass
+PKT_WIFI_ACK = 0x04   # u8 type, u32 req_id, u8 ok, u8 msg_len, msg
+AP_CONNECTION = "bodycam-ap"  # NetworkManager profile created by setup-ap.sh
 
 VIDEO_HDR = struct.Struct("!BIHHB")     # type, frame_id, chunk_idx, chunk_count, flags(bit0=keyframe)
 DETECT_HDR = struct.Struct("!BIBB")     # type, frame_id, ai_enabled, count
@@ -157,7 +161,7 @@ def net_loop(st):
         if not r:
             continue
         try:
-            data, addr = sock.recvfrom(64)
+            data, addr = sock.recvfrom(512)
         except OSError:
             continue
         if not data:
@@ -172,10 +176,63 @@ def net_loop(st):
                 log.info("AI %s", "ON" if st.ai_enabled else "OFF")
             st.link.send(STATUS.pack(PKT_STATUS, seq, st.ai_enabled, st.hailo_ok,
                                      min(st.enc_fps, 255), min(st.infer_fps, 255), cpu_temp()), addr)
+        elif kind == PKT_SET_WIFI:
+            handle_set_wifi(st, data, addr)
         elif kind == PKT_KEYFRAME_REQ:
             # Rate-limited so a lossy link can't turn the stream into all-IDR.
             if time.monotonic() - st.last_idr > 0.25:
                 st.force_idr.set()
+
+
+_last_wifi_req = None
+
+
+def handle_set_wifi(st, data, addr):
+    """Change the AP's SSID/password. Acks first, applies 1 s later (the AP restart drops the link).
+    The phone retries until acked, so duplicates of the same req_id are just re-acked."""
+    global _last_wifi_req
+
+    def ack(req_id, ok, msg):
+        m = msg.encode()[:200]
+        st.link.send(struct.pack("!BIBB", PKT_WIFI_ACK, req_id, ok, len(m)) + m, addr)
+
+    try:
+        req_id = struct.unpack_from("!I", data, 1)[0]
+        n = data[5]
+        ssid = data[6:6 + n].decode()
+        m = data[6 + n]
+        psk = data[7 + n:7 + n + m].decode()
+    except Exception:
+        return
+    if req_id == _last_wifi_req:
+        return ack(req_id, 1, "ok")
+    if not 1 <= len(ssid.encode()) <= 32:
+        return ack(req_id, 0, "SSID must be 1-32 bytes")
+    if not (8 <= len(psk) <= 63 and psk.isascii() and psk.isprintable()):
+        return ack(req_id, 0, "password must be 8-63 printable ASCII chars")
+    try:
+        names = subprocess.run(["nmcli", "-t", "-f", "NAME", "con", "show"],
+                               capture_output=True, text=True, timeout=5).stdout.split()
+    except Exception as e:
+        return ack(req_id, 0, f"nmcli failed: {e}")
+    if AP_CONNECTION not in names:
+        return ack(req_id, 0, "Pi is not running its own AP (run setup-ap.sh first)")
+    _last_wifi_req = req_id
+    ack(req_id, 1, "ok")
+    log.info("changing AP SSID to %r", ssid)
+
+    def apply():
+        time.sleep(1.0)  # let the ack (and its retries) get out first
+        r = subprocess.run(["nmcli", "con", "modify", AP_CONNECTION,
+                            "802-11-wireless.ssid", ssid, "wifi-sec.psk", psk],
+                           capture_output=True, text=True)
+        if r.returncode:
+            log.error("nmcli modify failed: %s", r.stderr.strip())
+            return
+        subprocess.run(["nmcli", "con", "up", AP_CONNECTION], capture_output=True, text=True)
+        log.info("AP restarted as %r", ssid)
+
+    threading.Thread(target=apply, daemon=True).start()
 
 
 # ---------------------------------------------------------------- video

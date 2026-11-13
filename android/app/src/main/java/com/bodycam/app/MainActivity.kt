@@ -25,6 +25,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 
 class MainActivity : Activity(), LinkService.Listener {
 
@@ -37,6 +38,7 @@ class MainActivity : Activity(), LinkService.Listener {
     private lateinit var aiButton: TextView
     private lateinit var alertButton: TextView
     private lateinit var dimButton: TextView
+    private lateinit var demoView: DemoView
     private var dimmed = false
     private var blink = false
 
@@ -88,7 +90,7 @@ class MainActivity : Activity(), LinkService.Listener {
         gravity = Gravity.CENTER
         typeface = android.graphics.Typeface.DEFAULT_BOLD
         minWidth = dp(104)
-        minHeight = dp(60) // glove-sized targets
+        minHeight = dp(50) // glove-sized targets
         setPadding(dp(12), dp(8), dp(12), dp(8))
         background = GradientDrawable().apply { cornerRadius = dp(6).toFloat(); setColor(Color.argb(160, 30, 30, 30)) }
         setOnClickListener { onClick() }
@@ -113,9 +115,12 @@ class MainActivity : Activity(), LinkService.Listener {
             }
         })
         overlay = OverlayView(this)
+        demoView = DemoView(this).apply { visibility = View.GONE }
         aspect.addView(surfaceView, FrameLayout.LayoutParams(-1, -1))
+        aspect.addView(demoView, FrameLayout.LayoutParams(-1, -1))
         aspect.addView(overlay, FrameLayout.LayoutParams(-1, -1))
-        root.addView(aspect, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+        // Video hugs the left edge so the button column on the right doesn't cover it.
+        root.addView(aspect, FrameLayout.LayoutParams(-1, -1, Gravity.START or Gravity.CENTER_VERTICAL))
 
         statusText = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -151,6 +156,7 @@ class MainActivity : Activity(), LinkService.Listener {
         style(aiButton, "AI ${if (s.aiEnabled) "on" else "off"}", s.aiEnabled)
         style(alertButton, "Buzz ${if (s.alertsEnabled) "on" else "off"}", s.alertsEnabled)
         style(dimButton, "Dim", dimmed)
+        demoView.visibility = if (s.demo) View.VISIBLE else View.GONE
     }
 
     private fun style(v: TextView, label: String, on: Boolean) {
@@ -209,6 +215,10 @@ class MainActivity : Activity(), LinkService.Listener {
             text = "Flip screen 180° (mount orientation)"
             isChecked = prefs().getBoolean(KEY_FLIP, false)
         }
+        val demo = CheckBox(this).apply {
+            text = "Demo mode (no Pi: fake scene, stops Wi-Fi search)"
+            isChecked = s.demo
+        }
         val note = TextView(this).apply {
             text = "Blank Wi-Fi name = use whatever Wi-Fi the phone is on (testing).\nDefault Pi IP on its own AP: ${LinkService.DEFAULT_HOST}"
             textSize = 12f
@@ -216,7 +226,7 @@ class MainActivity : Activity(), LinkService.Listener {
         val form = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(8), dp(20), 0)
-            listOf(ssid, pass, host, flip, note).forEach { addView(it) }
+            listOf(ssid, pass, host, flip, demo, note).forEach { addView(it) }
         }
         AlertDialog.Builder(this)
             .setTitle("Connection")
@@ -225,9 +235,53 @@ class MainActivity : Activity(), LinkService.Listener {
                 prefs().edit().putBoolean(KEY_FLIP, flip.isChecked).apply()
                 applyOrientation()
                 s.saveSettings(ssid.text.toString(), pass.text.toString(), host.text.toString())
+                s.setDemo(demo.isChecked)
+                refreshButtons()
             }
             .setNegativeButton("Cancel", null)
+            .setNeutralButton("Change Pi Wi-Fi…") { _, _ -> showChangePiWifi() }
             .show()
+    }
+
+    /** Rename the Pi's own network / change its password, over the live link. */
+    private fun showChangePiWifi() {
+        val s = service ?: return
+        fun field(hint: String) = EditText(this).apply {
+            this.hint = hint
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        }
+        val ssid = field("New Wi-Fi name").apply { setText(s.ssid) }
+        val pass = field("New password (8-63 chars)")
+        val note = TextView(this).apply {
+            text = "Must be connected to the Pi. It restarts its Wi-Fi (~5 s) and this phone reconnects with the new details automatically."
+            textSize = 12f
+        }
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+            listOf(ssid, pass, note).forEach { addView(it) }
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Change Pi Wi-Fi")
+            .setView(form)
+            .setPositiveButton("Apply", null)
+            .setNegativeButton("Cancel", null)
+            .show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val newSsid = ssid.text.toString().trim()
+            val newPass = pass.text.toString()
+            when {
+                newSsid.isEmpty() || newSsid.toByteArray().size > 32 -> ssid.error = "1-32 characters"
+                newPass.length !in 8..63 || !newPass.all { it.code in 32..126 } -> pass.error = "8-63 plain characters"
+                else -> {
+                    it.isEnabled = false
+                    s.changePiWifi(newSsid, newPass) { ok, msg ->
+                        Toast.makeText(this, if (ok) "Pi Wi-Fi changed to '$newSsid', reconnecting…" else "Failed: $msg", Toast.LENGTH_LONG).show()
+                        if (ok) dialog.dismiss() else it.isEnabled = true
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ service callbacks
@@ -243,11 +297,12 @@ class MainActivity : Activity(), LinkService.Listener {
                     else -> "  AI off"
                 }
                 val people = if (state.persons > 0) "  ⚠ ${state.persons} PERSON" else ""
-                "● LIVE ${state.fps}fps ${state.rttMs}ms$ai ${pi?.tempC ?: 0}°C$people" to
+                (if (state.demo) "● DEMO " else "● LIVE ") + "${state.fps}fps ${state.rttMs}ms$ai ${pi?.tempC ?: 0}°C$people" to
                     if (state.persons > 0) Color.RED else Color.GREEN
             }
             LinkService.Phase.STALLED -> "◌ VIDEO STALLED, resyncing…" to Color.YELLOW
-            LinkService.Phase.NO_PI -> "◌ Wi-Fi OK, waiting for Pi…" to if (blink) Color.YELLOW else Color.GRAY
+            LinkService.Phase.NO_PI -> (if (service?.ssid.isNullOrBlank()) "◌ Wi-Fi up, waiting for Pi…"
+                else "◌ SEARCHING '${service?.ssid}'… (on other Wi-Fi)") to if (blink) Color.YELLOW else Color.GRAY
             LinkService.Phase.NO_WIFI -> "◌ SEARCHING '${service?.ssid}'…" to if (blink) Color.RED else Color.GRAY
         }
         statusText.text = text

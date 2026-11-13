@@ -38,6 +38,7 @@ class LinkService : Service() {
         val rttMs: Int,
         val pi: PiStatus?,
         val persons: Int,
+        val demo: Boolean,
     )
 
     interface Listener {
@@ -64,6 +65,12 @@ class LinkService : Service() {
     @Volatile private var decoder: VideoDecoder? = null
 
     var listener: Listener? = null
+
+    /** Demo mode: Wi-Fi search stopped, scripted fake detections drive the UI and real vibration. */
+    @Volatile var demo = false
+        private set
+    private var demoThread: Thread? = null
+    private var surface: Surface? = null
 
     // link stats (written on rx thread, read on main)
     @Volatile private var lastStatusAt = 0L
@@ -124,6 +131,8 @@ class LinkService : Service() {
 
     override fun onDestroy() {
         main.removeCallbacksAndMessages(null)
+        demo = false
+        demoThread?.interrupt()
         connector?.stop()
         client?.close()
         setSurface(null)
@@ -145,9 +154,27 @@ class LinkService : Service() {
 
     /** (Re)start Wi-Fi acquisition with current settings. */
     fun reconnect() {
+        if (demo) return
         connector?.stop()
         onNetwork(null)
         connector = WifiConnector(this, ssid, password, ::onNetwork).also { it.start() }
+    }
+
+    /**
+     * Change the Pi's AP name/password. On success we adopt the new credentials ourselves and
+     * reconnect (the Pi restarts its AP ~1 s after acking). [done] runs on the main thread.
+     */
+    fun changePiWifi(newSsid: String, newPass: String, done: (Boolean, String) -> Unit) {
+        val c = client
+        if (c == null || demo) {
+            done(false, "Not connected to the Pi"); return
+        }
+        c.setPiWifi(newSsid, newPass) { ok, msg ->
+            main.post {
+                if (ok && ssid.isNotBlank()) saveSettings(newSsid, newPass, host)
+                done(ok, msg)
+            }
+        }
     }
 
     private fun onNetwork(net: Network?) {
@@ -161,8 +188,44 @@ class LinkService : Service() {
         }
     }
 
+    fun setDemo(on: Boolean) {
+        if (on == demo) return
+        demo = on
+        if (on) {
+            connector?.stop(); connector = null
+            client?.close(); client = null
+            network = null
+            attachDecoder(null)
+            demoThread = Thread({ demoLoop() }, "bodycam-demo").apply { isDaemon = true; start() }
+        } else {
+            demoThread?.interrupt(); demoThread = null
+            persons = 0
+            attachDecoder(surface)
+            reconnect()
+        }
+    }
+
+    private fun demoLoop() {
+        var tick = 0
+        try {
+            while (demo) {
+                val now = SystemClock.elapsedRealtime()
+                rxCallbacks.onFrame(EMPTY, false) // counts as a frame for fps/LIVE
+                if (tick % 2 == 0 && aiEnabled) rxCallbacks.onDetections(DemoScene.at(now))
+                if (tick % 3 == 0) rxCallbacks.onStatus(PiStatus(aiEnabled, true, 30, if (aiEnabled) 30 else 0, 48), 3)
+                tick++
+                Thread.sleep(33)
+            }
+        } catch (_: InterruptedException) {}
+    }
+
     // ------------------------------------------------------------------ video surface
     fun setSurface(surface: Surface?) {
+        this.surface = surface
+        attachDecoder(if (demo) null else surface)
+    }
+
+    private fun attachDecoder(surface: Surface?) {
         synchronized(decoderLock) {
             decoder?.release()
             decoder = surface?.let {
@@ -180,7 +243,7 @@ class LinkService : Service() {
         override fun onFrame(data: ByteArray, key: Boolean) {
             lastFrameAt = SystemClock.elapsedRealtime()
             framesThisSecond++
-            decoder?.submit(data, key)
+            if (data.isNotEmpty()) decoder?.submit(data, key)
         }
 
         override fun onDetections(boxes: List<Box>) {
@@ -246,6 +309,7 @@ class LinkService : Service() {
                 fpsWindowStart = now
             }
             val phase = when {
+                demo -> Phase.LIVE
                 client == null -> Phase.NO_WIFI
                 now - lastStatusAt > 1500 -> Phase.NO_PI
                 now - lastFrameAt > 1000 -> Phase.STALLED
@@ -255,7 +319,7 @@ class LinkService : Service() {
                 persons = 0
                 listener?.onBoxes(emptyList())
             }
-            listener?.onState(LinkState(phase, fps, rttMs, if (phase == Phase.NO_PI || phase == Phase.NO_WIFI) null else piStatus, persons))
+            listener?.onState(LinkState(phase, fps, rttMs, if (phase != Phase.LIVE && phase != Phase.STALLED) null else piStatus, persons, demo))
             main.postDelayed(this, 250)
         }
     }
@@ -286,6 +350,7 @@ class LinkService : Service() {
     }
 
     companion object {
+        private val EMPTY = ByteArray(0)
         private const val CHANNEL = "link"
         private const val KEY_AI = "ai"
         private const val KEY_ALERTS = "alerts"

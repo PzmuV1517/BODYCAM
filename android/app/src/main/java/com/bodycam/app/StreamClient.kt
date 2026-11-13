@@ -33,6 +33,16 @@ class StreamClient(
     @Volatile private var needKey = true
     @Volatile private var lastKeyReq = 0L
 
+    // pending SET_WIFI (resent by tx thread until acked or timed out)
+    private class WifiReq(val id: Int, val packet: ByteArray, val deadline: Long, val done: (Boolean, String) -> Unit)
+    @Volatile private var wifiReq: WifiReq? = null
+
+    /** Ask the Pi to change its AP SSID/password. [done] runs on the rx/tx thread. */
+    fun setPiWifi(ssid: String, pass: String, done: (Boolean, String) -> Unit) {
+        val id = (SystemClock.elapsedRealtime() and 0x7FFFFFFF).toInt()
+        wifiReq = WifiReq(id, Proto.setWifi(id, ssid, pass), SystemClock.elapsedRealtime() + 4000, done)
+    }
+
     private val socket = DatagramSocket()
     private val sentAt = LongArray(64)
 
@@ -77,6 +87,13 @@ class StreamClient(
                 val hello = Proto.hello(seq, wantAi)
                 socket.send(DatagramPacket(hello, hello.size, addr, port))
                 val now = SystemClock.elapsedRealtime()
+                wifiReq?.let { r ->
+                    if (now > r.deadline) {
+                        wifiReq = null; r.done(false, "Pi didn't answer")
+                    } else {
+                        socket.send(DatagramPacket(r.packet, r.packet.size, addr, port))
+                    }
+                }
                 if (needKey && now - lastKeyReq > 300) { // retried until a keyframe shows up
                     lastKeyReq = now
                     socket.send(DatagramPacket(byteArrayOf(Proto.KEYFRAME_REQ.toByte()), 1, addr, port))
@@ -108,6 +125,7 @@ class StreamClient(
                     Proto.VIDEO -> if (n > Proto.VIDEO_HDR) onVideo(buf, n)
                     Proto.DETECT -> if (n >= Proto.DETECT_HDR) onDetect(buf, n)
                     Proto.STATUS -> if (n >= Proto.STATUS_SIZE) onStatus(buf)
+                    Proto.WIFI_ACK -> if (n >= 7) onWifiAck(buf, n)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "bad packet", e)
@@ -168,6 +186,14 @@ class StreamClient(
             o += Proto.BOX_SIZE
         }
         cb.onDetections(boxes)
+    }
+
+    private fun onWifiAck(b: ByteArray, n: Int) {
+        val r = wifiReq ?: return
+        if (Proto.u32(b, 1).toInt() != r.id) return
+        wifiReq = null
+        val len = minOf(Proto.u8(b, 6), n - 7)
+        r.done(Proto.u8(b, 5) == 1, String(b, 7, len))
     }
 
     private fun onStatus(b: ByteArray) {

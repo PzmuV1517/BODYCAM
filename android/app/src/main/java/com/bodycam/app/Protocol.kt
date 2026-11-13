@@ -8,6 +8,8 @@ object Proto {
     const val STATUS = 0x03
     const val HELLO = 0x10
     const val KEYFRAME_REQ = 0x11
+    const val SET_WIFI = 0x12
+    const val WIFI_ACK = 0x04
 
     const val VIDEO_HDR = 10   // u8 type, u32 frame_id, u16 idx, u16 count, u8 flags
     const val DETECT_HDR = 7   // u8 type, u32 frame_id, u8 ai, u8 count
@@ -18,6 +20,16 @@ object Proto {
     fun u16(b: ByteArray, o: Int) = (u8(b, o) shl 8) or u8(b, o + 1)
     fun u32(b: ByteArray, o: Int) =
         (u8(b, o).toLong() shl 24) or (u8(b, o + 1).toLong() shl 16) or (u8(b, o + 2).toLong() shl 8) or u8(b, o + 3).toLong()
+
+    fun setWifi(reqId: Int, ssid: String, pass: String): ByteArray {
+        val s = ssid.toByteArray()
+        val p = pass.toByteArray()
+        return byteArrayOf(
+            SET_WIFI.toByte(),
+            (reqId ushr 24).toByte(), (reqId ushr 16).toByte(), (reqId ushr 8).toByte(), reqId.toByte(),
+            s.size.toByte(),
+        ) + s + byteArrayOf(p.size.toByte()) + p
+    }
 
     fun hello(seq: Int, wantAi: Boolean) = byteArrayOf(
         HELLO.toByte(),
