@@ -1,0 +1,18 @@
+[Unit]
+Description=BODYCAM camera + person detection UDP streamer
+After=NetworkManager.service
+Wants=NetworkManager.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Max CPU clocks (lower encode latency) and no Wi-Fi power saving (avoids latency spikes/drops).
+ExecStartPre=-/bin/sh -c 'echo performance > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor'
+ExecStartPre=-/usr/sbin/iw dev wlan0 set power_save off
+ExecStart=/usr/bin/python3 /opt/bodycam/server.py
+Restart=always
+RestartSec=1
+Nice=-10
+
+[Install]
+WantedBy=multi-user.target

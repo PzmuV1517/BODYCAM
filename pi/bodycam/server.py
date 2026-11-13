@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""BODYCAM Pi server.
+
+Camera Module 3 -> (optional Hailo person detection) -> H.264 over UDP to the phone.
+
+Design goals, in order: live feed always up, instant (re)connect, low latency, then quality.
+- Phone sends HELLO heartbeats (~10 Hz) to UDP :5600. The last address that sent a HELLO
+  is the viewer; video goes back to that address. No handshake, no sessions.
+- New viewer or a KEYFRAME_REQ -> next frame is an IDR, so the picture appears instantly.
+- Frames are dropped (never queued) if anything falls behind.
+- If the Hailo fails, video keeps streaming without AI.
+- If the camera stalls, the process exits and systemd restarts it.
+
+See ../README.md for the wire protocol.
+"""
+import argparse
+import logging
+import os
+import select
+import signal
+import socket
+import struct
+import threading
+import time
+from fractions import Fraction
+
+import av
+import numpy as np
+
+try:  # PyAV >= 12
+    from av.video.frame import PictureType
+    I_FRAME = PictureType.I
+except ImportError:  # PyAV 10/11 (Bookworm ships 10)
+    I_FRAME = "I"
+
+log = logging.getLogger("bodycam")
+
+# ---------------------------------------------------------------- protocol
+PKT_VIDEO = 0x01
+PKT_DETECT = 0x02
+PKT_STATUS = 0x03
+PKT_HELLO = 0x10
+PKT_KEYFRAME_REQ = 0x11
+
+VIDEO_HDR = struct.Struct("!BIHHB")     # type, frame_id, chunk_idx, chunk_count, flags(bit0=keyframe)
+DETECT_HDR = struct.Struct("!BIBB")     # type, frame_id, ai_enabled, count
+BOX = struct.Struct("!HHHHB")           # x1, y1, x2, y2 (0..65535 of frame), score (0..255)
+STATUS = struct.Struct("!BIBBBBB")      # type, echoed seq, ai_enabled, hailo_ok, enc_fps, infer_fps, cpu_temp_c
+HELLO = struct.Struct("!BIB")           # type, seq, want_ai (0=off, 1=on, 255=don't care)
+
+MAX_PAYLOAD = 1200                      # stays under any sane MTU, no IP fragmentation
+TOS_VIDEO = 0xB8                        # DSCP EF -> Wi-Fi WMM video access category
+MAX_BOXES = 20
+PERSON_CLASS = 0
+
+
+class LatestSlot:
+    """Single-item mailbox: put() overwrites, get() takes. Old frames are dropped, never queued."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._item = None
+
+    def put(self, item):
+        with self._cv:
+            self._item = item
+            self._cv.notify()
+
+    def get(self, timeout):
+        with self._cv:
+            if self._item is None:
+                self._cv.wait(timeout)
+            item, self._item = self._item, None
+            return item
+
+
+class Link:
+    """Tracks the current viewer (last address that sent a HELLO) and sends to it."""
+
+    def __init__(self, sock, timeout):
+        self.sock = sock
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._addr = None
+        self._last_seen = 0.0
+
+    def touch(self, addr):
+        """Returns True if this is a new viewer (or one coming back after a timeout)."""
+        now = time.monotonic()
+        with self._lock:
+            new = addr != self._addr or now - self._last_seen > self.timeout
+            self._addr, self._last_seen = addr, now
+        if new:
+            log.info("viewer %s:%d connected", *addr)
+        return new
+
+    def target(self):
+        with self._lock:
+            if self._addr and time.monotonic() - self._last_seen < self.timeout:
+                return self._addr
+        return None
+
+    def send(self, data, addr=None):
+        addr = addr or self.target()
+        if not addr:
+            return False
+        try:
+            self.sock.sendto(data, addr)
+            return True
+        except (BlockingIOError, OSError):
+            return False  # buffer full / link down: drop, never block
+
+
+class State:
+    def __init__(self, args, link):
+        self.args = args
+        self.link = link
+        self.running = True
+        self.ai_enabled = args.ai_default
+        self.hailo_ok = False
+        self.force_idr = threading.Event()
+        self.last_idr = 0.0
+        self.last_frame = time.monotonic()
+        self.video_slot = LatestSlot()
+        self.ai_slot = LatestSlot()
+        self.enc_fps = 0
+        self.infer_fps = 0
+
+
+def fatal_on_error(fn):
+    """Any crash in a critical thread kills the process so systemd restarts it fast."""
+
+    def wrapper(*a, **kw):
+        try:
+            fn(*a, **kw)
+        except Exception:
+            log.exception("fatal error in %s", fn.__name__)
+            os._exit(2)
+
+    return wrapper
+
+
+def cpu_temp():
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return max(0, min(255, int(f.read()) // 1000))
+    except OSError:
+        return 0
+
+
+# ---------------------------------------------------------------- network
+@fatal_on_error
+def net_loop(st):
+    sock = st.link.sock
+    while st.running:
+        r, _, _ = select.select([sock], [], [], 0.5)
+        if not r:
+            continue
+        try:
+            data, addr = sock.recvfrom(64)
+        except OSError:
+            continue
+        if not data:
+            continue
+        kind = data[0]
+        if kind == PKT_HELLO and len(data) >= HELLO.size:
+            _, seq, want_ai = HELLO.unpack_from(data)
+            if st.link.touch(addr):
+                st.force_idr.set()
+            if want_ai in (0, 1) and bool(want_ai) != st.ai_enabled:
+                st.ai_enabled = bool(want_ai)
+                log.info("AI %s", "ON" if st.ai_enabled else "OFF")
+            st.link.send(STATUS.pack(PKT_STATUS, seq, st.ai_enabled, st.hailo_ok,
+                                     min(st.enc_fps, 255), min(st.infer_fps, 255), cpu_temp()), addr)
+        elif kind == PKT_KEYFRAME_REQ:
+            # Rate-limited so a lossy link can't turn the stream into all-IDR.
+            if time.monotonic() - st.last_idr > 0.25:
+                st.force_idr.set()
+
+
+# ---------------------------------------------------------------- video
+def make_encoder(a):
+    kbps = a.bitrate
+    ctx = av.CodecContext.create("libx264", "w")
+    ctx.width, ctx.height = a.width, a.height
+    ctx.pix_fmt = "yuv420p"
+    ctx.time_base = Fraction(1, a.fps)
+    ctx.framerate = Fraction(a.fps, 1)
+    ctx.bit_rate = kbps * 1000
+    ctx.gop_size = a.gop
+    ctx.max_b_frames = 0
+    ctx.thread_count = 2
+    ctx.options = {
+        "preset": "ultrafast",
+        "tune": "zerolatency",
+        "forced-idr": "1",
+        # repeat-headers: SPS/PPS before every IDR so a fresh decoder can start on any keyframe.
+        # Small VBV caps frame-size spikes so keyframes don't flood the Wi-Fi.
+        "x264-params": (f"repeat-headers=1:annexb=1:keyint={a.gop}:min-keyint={a.gop}:scenecut=0:"
+                        f"vbv-maxrate={kbps}:vbv-bufsize={kbps // 8}:sliced-threads=1"),
+    }
+    return ctx
+
+
+def pack_yuv420(arr, w, h):
+    """Strip row padding (stride) from a picamera2 YUV420 array -> contiguous (h*3/2, w)."""
+    stride = arr.shape[1]
+    if stride == w:
+        return arr
+    flat = arr.reshape(-1)
+    ys, cs = stride * h, (stride // 2) * (h // 2)
+    y = flat[:ys].reshape(h, stride)[:, :w]
+    u = flat[ys:ys + cs].reshape(h // 2, stride // 2)[:, :w // 2]
+    v = flat[ys + cs:ys + 2 * cs].reshape(h // 2, stride // 2)[:, :w // 2]
+    return np.concatenate([y.ravel(), u.ravel(), v.ravel()]).reshape(h * 3 // 2, w)
+
+
+def send_video(link, frame_id, data, keyframe):
+    addr = link.target()
+    if not addr:
+        return
+    count = (len(data) + MAX_PAYLOAD - 1) // MAX_PAYLOAD
+    flags = 1 if keyframe else 0
+    for i in range(count):
+        chunk = data[i * MAX_PAYLOAD:(i + 1) * MAX_PAYLOAD]
+        if not link.send(VIDEO_HDR.pack(PKT_VIDEO, frame_id, i, count, flags) + chunk, addr):
+            return  # rest of the frame is useless; phone will ask for a keyframe
+
+
+@fatal_on_error
+def encoder_loop(st):
+    a = st.args
+    enc = make_encoder(a)
+    frames, t0 = 0, time.monotonic()
+    while st.running:
+        item = st.video_slot.get(timeout=1.0)
+        if item is None:
+            continue
+        n, yuv = item
+        frame = av.VideoFrame.from_ndarray(pack_yuv420(yuv, a.width, a.height), format="yuv420p")
+        frame.pts = n
+        if st.force_idr.is_set():
+            st.force_idr.clear()
+            st.last_idr = time.monotonic()
+            frame.pict_type = I_FRAME
+        for pkt in enc.encode(frame):
+            send_video(st.link, n & 0xFFFFFFFF, bytes(pkt), pkt.is_keyframe)
+        frames += 1
+        now = time.monotonic()
+        if now - t0 >= 1.0:
+            st.enc_fps, frames, t0 = round(frames / (now - t0)), 0, now
+
+
+# ---------------------------------------------------------------- AI
+def load_hailo(path):
+    try:
+        from picamera2.devices import Hailo
+        hailo = Hailo(path)
+        log.info("Hailo model loaded: %s input=%s", path, hailo.get_input_shape())
+        return hailo
+    except Exception:
+        log.exception("Hailo unavailable, streaming without AI")
+        return None
+
+
+def parse_persons(out, pad_top, pad_left, img_w, img_h, model_w, model_h, thresh):
+    """Hailo NMS output (list per class of [y0, x0, y1, x1, score]) -> packed boxes in frame coords."""
+    if isinstance(out, list) and len(out) == 1 and isinstance(out[0], list):
+        out = out[0]  # batch dimension
+    dets = out[PERSON_CLASS] if len(out) > PERSON_CLASS else []
+    boxes = []
+    for d in dets:
+        score = float(d[4])
+        if score < thresh:
+            continue
+        y0, x0, y1, x1 = (float(v) for v in d[:4])
+        # undo letterbox: model-normalized -> image-normalized
+        fx = lambda x: min(1.0, max(0.0, (x * model_w - pad_left) / img_w))
+        fy = lambda y: min(1.0, max(0.0, (y * model_h - pad_top) / img_h))
+        boxes.append((score, fx(x0), fy(y0), fx(x1), fy(y1)))
+    boxes.sort(reverse=True)
+    return boxes[:MAX_BOXES]
+
+
+@fatal_on_error
+def inference_loop(st, hailo):
+    a = st.args
+    model_h, model_w, _ = hailo.get_input_shape()
+    canvas = np.zeros((model_h, model_w, 3), np.uint8)
+    runs, t0 = 0, time.monotonic()
+    while st.running:
+        item = st.ai_slot.get(timeout=1.0)
+        now = time.monotonic()
+        if now - t0 >= 1.0:
+            st.infer_fps, runs, t0 = round(runs / (now - t0)), 0, now
+        if item is None or not st.ai_enabled:
+            continue
+        n, rgb = item
+        h, w = rgb.shape[:2]
+        top, left = (model_h - h) // 2, (model_w - w) // 2
+        canvas[top:top + h, left:left + w] = rgb[:, :, :3]
+        try:
+            out = hailo.run(canvas)
+        except Exception:
+            log.exception("Hailo inference failed, AI disabled")
+            st.hailo_ok = False
+            return
+        runs += 1
+        boxes = parse_persons(out, top, left, w, h, model_w, model_h, a.threshold)
+        pkt = bytearray(DETECT_HDR.pack(PKT_DETECT, n & 0xFFFFFFFF, 1, len(boxes)))
+        for score, x0, y0, x1, y1 in boxes:
+            pkt += BOX.pack(int(x0 * 65535), int(y0 * 65535), int(x1 * 65535), int(y1 * 65535),
+                            int(score * 255))
+        st.link.send(bytes(pkt))
+
+
+# ---------------------------------------------------------------- camera
+def watchdog_loop(st):
+    while st.running:
+        time.sleep(1)
+        if time.monotonic() - st.last_frame > 5:
+            log.error("camera stalled >5s, exiting for restart")
+            os._exit(3)
+
+
+def open_camera(a, lores_size):
+    from picamera2 import Picamera2
+
+    cam = Picamera2()
+    frame_us = int(1_000_000 / a.fps)
+    controls = {"FrameDurationLimits": (frame_us, frame_us)}  # fixed fps: never slow down in the dark
+    try:
+        from libcamera import controls as lc
+        controls["AfMode"] = lc.AfModeEnum.Continuous
+        controls["AfSpeed"] = lc.AfSpeedEnum.Fast
+    except Exception:
+        pass
+    kwargs = dict(
+        main={"size": (a.width, a.height), "format": "YUV420"},
+        lores={"size": lores_size, "format": "BGR888"} if lores_size else None,  # BGR888 = R,G,B bytes
+        buffer_count=4,
+        queue=False,  # always hand us the freshest frame
+        controls=controls,
+    )
+    if a.sensor_mode:
+        # 2304x1296 on Camera Module 3 = full field of view, binned (better low light, up to 56 fps).
+        sw, sh = (int(v) for v in a.sensor_mode.split("x"))
+        kwargs["sensor"] = {"output_size": (sw, sh)}
+    try:
+        cfg = cam.create_video_configuration(**kwargs)
+    except TypeError:
+        kwargs.pop("sensor", None)
+        cfg = cam.create_video_configuration(**kwargs)
+    cam.configure(cfg)
+    cam.start()
+    log.info("camera started: %s", cam.camera_configuration()["main"])
+    return cam
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--port", type=int, default=5600)
+    p.add_argument("--width", type=int, default=1280)
+    p.add_argument("--height", type=int, default=720)
+    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--bitrate", type=int, default=2000, help="kbps")
+    p.add_argument("--gop", type=int, default=15, help="keyframe interval in frames")
+    p.add_argument("--sensor-mode", default="2304x1296", help="'' to let picamera2 choose")
+    p.add_argument("--model", default="/usr/share/hailo-models/yolov8s_h8.hef")
+    p.add_argument("--threshold", type=float, default=0.45)
+    p.add_argument("--no-ai", dest="ai_default", action="store_false", help="start with AI off")
+    p.add_argument("--viewer-timeout", type=float, default=2.0, help="s without HELLO = viewer gone")
+    a = p.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, TOS_VIDEO)
+    sock.bind(("0.0.0.0", a.port))
+    sock.setblocking(False)
+
+    st = State(a, Link(sock, a.viewer_timeout))
+
+    if not os.path.exists(a.model):
+        # hailo-models package naming varies by version; take any YOLO person-capable model.
+        import glob
+        found = sorted(glob.glob("/usr/share/hailo-models/yolov8s*.hef")) + \
+            sorted(glob.glob("/usr/share/hailo-models/yolov*.hef"))
+        if found:
+            log.warning("model %s not found, using %s", a.model, found[0])
+            a.model = found[0]
+    hailo = load_hailo(a.model) if os.path.exists(a.model) else None
+    if hailo is None and not os.path.exists(a.model):
+        log.error("model not found: %s (streaming without AI)", a.model)
+    lores_size = None
+    if hailo:
+        st.hailo_ok = True
+        _, model_w, _ = hailo.get_input_shape()
+        lores_size = (model_w, (model_w * a.height // a.width) // 2 * 2)  # same aspect, letterboxed later
+
+    cam = open_camera(a, lores_size)
+
+    def stop(*_):
+        st.running = False
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    threads = [threading.Thread(target=net_loop, args=(st,), daemon=True),
+               threading.Thread(target=encoder_loop, args=(st,), daemon=True),
+               threading.Thread(target=watchdog_loop, args=(st,), daemon=True)]
+    if hailo:
+        threads.append(threading.Thread(target=inference_loop, args=(st, hailo), daemon=True))
+    for t in threads:
+        t.start()
+    log.info("streaming on udp/%d (AI %s)", a.port, "ready" if hailo else "unavailable")
+
+    n = 0
+    while st.running:
+        req = cam.capture_request()
+        try:
+            yuv = req.make_array("main")
+            rgb = req.make_array("lores") if lores_size else None
+        finally:
+            req.release()
+        n += 1
+        st.last_frame = time.monotonic()
+        if st.link.target() is None:
+            continue  # nobody watching: don't burn CPU/heat encoding
+        st.video_slot.put((n, yuv))
+        if rgb is not None and st.ai_enabled and st.hailo_ok:
+            st.ai_slot.put((n, rgb))
+
+    cam.stop()
+    if hailo:
+        hailo.close()
+
+
+if __name__ == "__main__":
+    main()
