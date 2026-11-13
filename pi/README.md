@@ -1,15 +1,15 @@
-# BODYCAM – Pi side
+# BODYCAM, Pi side
 
 Pi 5 + AI HAT+ (Hailo-8, 26 TOPS) + Camera Module 3 NoIR. Hosts a Wi-Fi AP, streams H.264 over UDP
 to the phone, runs person detection on the Hailo, sends boxes as metadata.
 
 ## 1. Flash the OS
 
-**Raspberry Pi OS Lite (64-bit), Bookworm** – Raspberry Pi Imager → *Raspberry Pi OS (other)* →
+**Raspberry Pi OS Lite (64-bit), Bookworm or Trixie**, Raspberry Pi Imager → *Raspberry Pi OS (other)* →
 *Raspberry Pi OS Lite (64-bit)*. No desktop = faster boot, more RAM/CPU for us.
 
 In Imager's settings: hostname `bodycam`, enable SSH, set user/password, set Wi-Fi country
-(and your home Wi-Fi for the initial install – the Pi needs internet for `apt`).
+(and your home Wi-Fi for the initial install, the Pi needs internet for `apt`).
 
 Hardware: use the **Pi 5 camera cable** (22→15 pin), an **active cooler**, and a **5V/5A USB-C PD** supply.
 
@@ -26,7 +26,7 @@ rpicam-hello --list-cameras             # imx708_noir should show up
 ls /usr/share/hailo-models/             # see which .hef models you have
 ```
 
-## 3. Access point (do this last – it drops your home Wi-Fi connection)
+## 3. Access point (do this last, it drops your home Wi-Fi connection)
 
 ```bash
 sudo ./setup-ap.sh BODYCAM 'yourpassword' RO 6
