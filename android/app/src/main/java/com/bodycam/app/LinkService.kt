@@ -207,6 +207,10 @@ class LinkService : Service() {
     val host get() = prefs.getString(KEY_HOST, DEFAULT_HOST)!!
 
     fun saveSettings(ssid: String, password: String, host: String) {
+        val h = host.trim().ifEmpty { DEFAULT_HOST }
+        // Only touch the link if something changed: reconnecting drops the Pi link for a moment
+        // and re-suggesting the Wi-Fi can make Android leave it.
+        if (ssid.trim() == this.ssid && password == this.password && h == this.host) return
         prefs.edit().putString(KEY_SSID, ssid.trim()).putString(KEY_PASS, password)
             .putString(KEY_HOST, host.trim().ifEmpty { DEFAULT_HOST }).apply()
         reconnect()

@@ -330,8 +330,28 @@ async def amain():
     await props.call_set("org.bluez.Adapter1", "Alias", Variant("s", "BODYCAM"))
     await obj.get_interface("org.bluez.GattManager1").call_register_application(APP_PATH, {})
     log.info("GATT registered")
-    await obj.get_interface("org.bluez.LEAdvertisingManager1").call_register_advertisement(ADV_PATH, {})
+    adv_mgr = obj.get_interface("org.bluez.LEAdvertisingManager1")
+    await adv_mgr.call_register_advertisement(ADV_PATH, {})
     log.info("advertising as BODYCAM")
+
+    # BlueZ does not always resume advertising after a client disconnects (the Pi then becomes
+    # invisible after one session). Check every 3 s and re-register when no instance is active.
+    async def keep_advertising():
+        while True:
+            await asyncio.sleep(3)
+            try:
+                active = (await props.call_get("org.bluez.LEAdvertisingManager1", "ActiveInstances")).value
+                if active == 0:
+                    try:
+                        await adv_mgr.call_unregister_advertisement(ADV_PATH)
+                    except Exception:
+                        pass
+                    await adv_mgr.call_register_advertisement(ADV_PATH, {})
+                    log.info("advertising resumed")
+            except Exception as e:
+                log.warning("advertising check failed: %s", e)
+
+    loop.create_task(keep_advertising())
     await bus.wait_for_disconnect()  # bluetoothd/dbus gone: exit, systemd restarts us
 
 
