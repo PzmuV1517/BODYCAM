@@ -98,6 +98,7 @@ def status():
     return (f"ap={'up' if ap_up else 'down'}\nssid={ssid}\nchannel={chan}\nclients={clients}\n"
             f"service={svc}\ntemp_c={temp}\nfan_rpm={fan_rpm}\nfan_indicator={'on' if fan.indicator_enabled() else 'off'}\n"
             f"night_exposure={'on' if fan.load_settings().get('night_exposure') else 'off'}\n"
+            f"fan_override={fan.get_override() or 'auto'}\n"
             f"uptime={up}\nip={ips}\n")
 
 
@@ -137,7 +138,14 @@ def handle(session, line):
         if arg.strip() == "test":
             fan.pulse()
             return 0, "fan pulsed twice\n"
-        return 1, "usage: fan indicator on|off | fan test\n"
+        parts = arg.split()
+        if len(parts) == 2 and parts[0] == "override":
+            pct = 0 if parts[1] == "auto" else int(parts[1]) if parts[1].isdigit() else -1
+            if not 0 <= pct <= 100:
+                return 1, "usage: fan override 0-100|auto\n"
+            fan.set_override(pct)
+            return 0, f"fan {'auto' if pct == 0 else f'override {pct}%'}\n"
+        return 1, "usage: fan indicator on|off | fan test | fan override 0-100|auto\n"
     if cmd == "reboot":
         threading.Timer(1.0, lambda: os.system("systemctl reboot")).start()
         return 0, "rebooting\n"

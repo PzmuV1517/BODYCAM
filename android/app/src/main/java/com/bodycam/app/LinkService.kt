@@ -114,6 +114,27 @@ class LinkService : Service() {
         fanWishReset = Runnable { client?.wantFan = 255 }.also { main.postDelayed(it, 3000) }
     }
 
+    private var ovrWishReset: Runnable? = null
+    private var pendingOverride: Int? = null
+    private var pendingOverrideAt = 0L
+
+    /** Fan override as the user sees it: the value just requested (for quick repeated taps), else the Pi's. */
+    val fanOverride: Int?
+        get() = if (pendingOverride != null && SystemClock.elapsedRealtime() - pendingOverrideAt < 1500) pendingOverride
+        else piStatus?.fanOverride
+    val fanRpm: Int? get() = piStatus?.fanRpm
+
+    /** 0 = back to the automatic quiet curve, 1..100 = fixed fan speed. */
+    fun setFanOverride(pct: Int) {
+        val c = client ?: return
+        val v = pct.coerceIn(0, 100)
+        pendingOverride = v
+        pendingOverrideAt = SystemClock.elapsedRealtime()
+        c.wantOverride = v
+        ovrWishReset?.let { main.removeCallbacks(it) }
+        ovrWishReset = Runnable { client?.wantOverride = 255 }.also { main.postDelayed(it, 3000) }
+    }
+
     fun setNightExposure(on: Boolean) {
         val c = client ?: return
         c.wantNight = if (on) 1 else 0

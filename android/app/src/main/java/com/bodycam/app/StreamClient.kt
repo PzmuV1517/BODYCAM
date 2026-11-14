@@ -31,6 +31,7 @@ class StreamClient(
     @Volatile var wantAi = true
     @Volatile var wantFan = 255 // 0/1 while the user is changing the Pi's fan signal setting
     @Volatile var wantNight = 255 // same for night exposure
+    @Volatile var wantOverride = 255 // fan override: 0 = auto, 1..100 %, 255 = leave
 
     /** Pi clock minus phone clock (elapsedRealtime), ms mod 2^32; from the fastest status replies. */
     @Volatile var clockOffsetMs: Long? = null
@@ -91,7 +92,7 @@ class StreamClient(
             try {
                 seq++
                 sentAt[seq and 63] = SystemClock.elapsedRealtime()
-                val hello = Proto.hello(seq, wantAi, wantFan, wantNight)
+                val hello = Proto.hello(seq, wantAi, wantFan, wantNight, wantOverride)
                 socket.send(DatagramPacket(hello, hello.size, addr, port))
                 val now = SystemClock.elapsedRealtime()
                 wifiReq?.let { r ->
@@ -210,6 +211,8 @@ class StreamClient(
         val rtt = (recv - sentAt[seq and 63]).toInt().coerceIn(0, 9999)
         var fanInd: Boolean? = null
         val night: Boolean? = if (n >= Proto.STATUS_EXT2) Proto.u8(b, 15) != 0 else null
+        val ovr: Int? = if (n >= Proto.STATUS_EXT3) Proto.u8(b, 16) else null
+        val rpm: Int? = if (n >= Proto.STATUS_EXT3) Proto.u16(b, 17) else null
         if (n >= Proto.STATUS_EXT) {
             // Clock sync: Pi time at reply ~= phone time at receive - rtt/2. Keep the sample with
             // the smallest RTT (least queueing) out of the last 50.
@@ -229,6 +232,8 @@ class StreamClient(
                 tempC = Proto.u8(b, 9),
                 fanIndicator = fanInd,
                 nightExposure = night,
+                fanOverride = ovr,
+                fanRpm = rpm,
             ),
             rtt,
         )

@@ -107,7 +107,19 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
                     { "RUN" }, { State.NEUTRAL }) {
                     svc?.testAlert()
                 },
-                null, null, null,
+                Spec("FAN -", "Lowers the fixed fan speed by 10%. Reaching 0% ends the override and the fan goes back to the automatic quiet curve.",
+                    { "-10%" }, { if (svc?.fanOverride == null) State.DISABLED else State.NEUTRAL }) {
+                    svc?.fanOverride?.let { if (it > 0) svc?.setFanOverride(it - 10) }
+                },
+                Spec("FAN", "Fan speed. AUTO = quiet automatic curve, a % = fixed speed you set. Tap to go back to AUTO. A fixed speed is cancelled at 80 C and on every restart. Shows the measured speed in RPM.",
+                    { svc?.fanOverride?.let { o -> (if (o == 0) "AUTO" else "$o%") + (svc?.fanRpm?.let { " ${it}RPM" } ?: "") } ?: "NO LINK" },
+                    { when (svc?.fanOverride) { null -> State.DISABLED; 0 -> State.NEUTRAL; else -> State.ON } }) {
+                    svc?.setFanOverride(0)
+                },
+                Spec("FAN +", "Raises the fan speed by 10%. From AUTO the first tap sets a fixed 10%.",
+                    { "+10%" }, { if (svc?.fanOverride == null) State.DISABLED else State.NEUTRAL }) {
+                    svc?.fanOverride?.let { svc?.setFanOverride(minOf(100, it + 10)) }
+                },
             ),
             "LINK" to listOf(
                 Spec("SSID", "Network name of the Pi. Empty = use the Wi-Fi the phone is already on (bench test). Tap to edit.",

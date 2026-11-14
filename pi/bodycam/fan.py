@@ -84,3 +84,46 @@ def pulse(times=2, on=1.2, off=1.5):
                 _set_trips(saved)
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------- manual speed override
+# Override = thermal control of the fan switched off and a fixed PWM written. The state lives in
+# sysfs (thermal zone mode + pwm1), so the video server and the BLE console always agree.
+import glob as _glob  # noqa: E402
+
+
+def _pwm_path():
+    paths = _glob.glob("/sys/devices/platform/cooling_fan/hwmon/hwmon*/pwm1")
+    return paths[0] if paths else None
+
+
+def rpm():
+    try:
+        return int(open(_glob.glob("/sys/devices/platform/cooling_fan/hwmon/hwmon*/fan1_input")[0]).read())
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def get_override():
+    """0 = automatic (quiet curve), 1..100 = fixed speed in %."""
+    try:
+        if open(f"{TZ}/mode").read().strip() != "disabled":
+            return 0
+        return max(1, round(int(open(_pwm_path()).read()) * 100 / 255))
+    except (OSError, TypeError, ValueError):
+        return 0
+
+
+def set_override(pct):
+    """pct <= 0: back to automatic. 1..100: fixed speed."""
+    pct = max(0, min(100, int(pct)))
+    pwm = _pwm_path()
+    if pct == 0:
+        with open(f"{TZ}/mode", "w") as f:
+            f.write("enabled")
+        return
+    with open(f"{TZ}/mode", "w") as f:
+        f.write("disabled")
+    if pwm:
+        with open(pwm, "w") as f:
+            f.write(str(round(pct * 255 / 100)))

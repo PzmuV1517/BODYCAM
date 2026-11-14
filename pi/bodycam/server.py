@@ -53,10 +53,12 @@ VIDEO_HDR = struct.Struct("!BIHHBI")    # type, frame_id, chunk_idx, chunk_count
 DETECT_HDR = struct.Struct("!BIBB")     # type, frame_id, ai_enabled, count
 BOX = struct.Struct("!HHHHB")           # x1, y1, x2, y2 (0..65535 of frame), score (0..255)
 # type, echoed seq, ai_enabled, hailo_ok, enc_fps, infer_fps, cpu_temp_c, pi_now_ms, fan_indicator
-STATUS = struct.Struct("!BIBBBBBIBB")  # ..., fan_indicator, night_exposure
+STATUS = struct.Struct("!BIBBBBBIBBBH")  # ..., fan_indicator, night_exposure, fan_override_pct, fan_rpm
 HELLO = struct.Struct("!BIB")           # type, seq, want_ai (0=off, 1=on, 255=don't care)
 HELLO_FAN = struct.Struct("!BIBB")      # + want_fan_indicator (0/1/255), newer clients
 HELLO_NIGHT = struct.Struct("!BIBBB")   # + want_night_exposure (0/1/255)
+HELLO_OVR = struct.Struct("!BIBBBB")    # + want_fan_override (0 = auto, 1..100 %, 255 = leave)
+FAN_OVERRIDE_MAX_C = 80                 # safety: override cancelled at this temperature
 
 
 def now_ms():
@@ -192,6 +194,7 @@ def net_loop(st):
     last_want = {}
     last_fan = {}
     last_night = {}
+    last_ovr = {}
     while st.running:
         r, _, _ = select.select([sock], [], [], 0.5)
         if not r:
@@ -210,7 +213,23 @@ def net_loop(st):
                 last_want.pop(addr, None)
                 last_fan.pop(addr, None)
                 last_night.pop(addr, None)
+                last_ovr.pop(addr, None)
             want_night = data[7] if len(data) >= HELLO_NIGHT.size else 255
+            if want_night == 255:
+                last_night.pop(addr, None)
+            want_ovr = data[8] if len(data) >= HELLO_OVR.size else 255
+            if want_ovr == 255:
+                last_ovr.pop(addr, None)
+            elif want_ovr <= 100 and last_ovr.get(addr) != want_ovr:
+                last_ovr[addr] = want_ovr
+                if want_ovr > 0 and cpu_temp() >= FAN_OVERRIDE_MAX_C:
+                    log.warning("fan override refused: %d C", cpu_temp())
+                else:
+                    try:
+                        fan.set_override(want_ovr)
+                        log.info("fan %s (by %s)", f"override {want_ovr}%" if want_ovr else "auto", addr[0])
+                    except OSError as e:
+                        log.error("fan override failed: %s", e)
             if want_night in (0, 1) and last_night.get(addr) != want_night:
                 last_night[addr] = want_night
                 if bool(want_night) != st.night_exposure:
@@ -219,6 +238,8 @@ def net_loop(st):
                     apply_exposure(st)
                     log.info("night exposure %s (by %s)", "ON" if st.night_exposure else "OFF", addr[0])
             want_fan = data[6] if len(data) >= HELLO_FAN.size else 255
+            if want_fan == 255:
+                last_fan.pop(addr, None)
             if want_fan in (0, 1) and last_fan.get(addr) != want_fan:
                 last_fan[addr] = want_fan
                 if bool(want_fan) != st.fan_indicator:
@@ -233,7 +254,8 @@ def net_loop(st):
                     log.info("AI %s (by %s)", "ON" if st.ai_enabled else "OFF", addr[0])
             st.link.send(STATUS.pack(PKT_STATUS, seq, st.ai_enabled, st.hailo_ok,
                                      min(st.enc_fps, 255), min(st.infer_fps, 255), cpu_temp(),
-                                     now_ms(), st.fan_indicator, st.night_exposure), addr)
+                                     now_ms(), st.fan_indicator, st.night_exposure,
+                                     fan.get_override(), min(fan.rpm(), 65535)), addr)
         elif kind == PKT_SET_WIFI:
             handle_set_wifi(st, data, addr)
         elif kind == PKT_KEYFRAME_REQ:
@@ -458,6 +480,9 @@ def watchdog_loop(st):
     last_stats = time.monotonic()
     while st.running:
         time.sleep(1)
+        if fan.get_override() and cpu_temp() >= FAN_OVERRIDE_MAX_C:
+            fan.set_override(0)
+            log.warning("fan override cancelled: %d C, back to automatic", cpu_temp())
         if time.monotonic() - last_stats >= 5:
             last_stats = time.monotonic()
             v = st.link.viewers()
@@ -569,8 +594,16 @@ def main():
         # Exit right away: closing the Hailo while an inference is running can deadlock, and the
         # kernel releases the camera and Hailo anyway. Keeps restarts/deploys to ~1 s.
         log.info("stopping")
+        try:
+            fan.set_override(0)  # never leave the fan on a fixed speed without us watching it
+        except OSError:
+            pass
         os._exit(0)
 
+    try:
+        fan.set_override(0)  # an override never survives a restart
+    except OSError:
+        pass
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
