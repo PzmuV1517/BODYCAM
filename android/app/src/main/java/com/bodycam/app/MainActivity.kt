@@ -1,7 +1,6 @@
 package com.bodycam.app
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -12,7 +11,6 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.IBinder
-import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -22,14 +20,9 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
-import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.SeekBar
 import android.widget.TextView
-import android.widget.Toast
 
 /**
  * Landscape chest-mount display. Layout and colors follow MIL-STD-1472 conventions:
@@ -51,6 +44,7 @@ class MainActivity : Activity(), LinkService.Listener {
     private lateinit var vibButton: TextView
     private lateinit var nightButton: TextView
     private lateinit var menuButton: TextView
+    private lateinit var menu: GloveMenu
     private var night = false
     private var videoOffset = 0f // 0 = left edge, 1 = right edge
 
@@ -165,7 +159,7 @@ class MainActivity : Activity(), LinkService.Listener {
         detButton = button { service?.let { it.aiEnabled = !it.aiEnabled; refresh() } }
         vibButton = button { service?.let { it.alertsEnabled = !it.alertsEnabled; refresh() } }
         nightButton = button { toggleNight() }
-        menuButton = button { showMenu() }
+        menuButton = button { menu.open() }
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(6), dp(6), dp(10), dp(6))
@@ -175,8 +169,16 @@ class MainActivity : Activity(), LinkService.Listener {
         }
         root.addView(bar, FrameLayout.LayoutParams(-2, -1, Gravity.END))
 
+        menu = GloveMenu(this, menuHost)
+        root.addView(menu, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
         refresh()
+        // Back closes the menu; otherwise it only hides the app (link and alerts keep running).
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
+                if (menu.isOpen) menu.close() else moveTaskToBack(true)
+            }
+        }
     }
 
     private fun applyOffset() {
@@ -228,175 +230,21 @@ class MainActivity : Activity(), LinkService.Listener {
     }
 
     // ------------------------------------------------------------------ menu
-    private fun dialog() = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-
-    private fun help(title: String, text: String) {
-        dialog().setTitle(title).setMessage(text).setPositiveButton("OK", null).show()
-    }
-
-    /** One settings row: LABEL  [control]  (?) */
-    private fun row(label: String, control: View, helpText: String) = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, dp(4), 0, dp(4))
-        addView(TextView(context).apply {
-            text = label
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            textSize = 14f
-        }, LinearLayout.LayoutParams(dp(150), -2))
-        addView(control, LinearLayout.LayoutParams(0, -2, 1f))
-        addView(TextView(context).apply {
-            text = "?"
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL; setStroke(dp(2), Color.GRAY)
+    private val menuHost = object : GloveMenu.Host {
+        override val service get() = this@MainActivity.service
+        override val night get() = this@MainActivity.night
+        override var videoOffset: Float
+            get() = this@MainActivity.videoOffset
+            set(v) {
+                this@MainActivity.videoOffset = v
+                prefs().edit().putFloat(KEY_OFFSET, v).apply()
             }
-            setOnClickListener { help(label, helpText) }
-        }, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(8) })
-    }
-
-    private fun input(value: String, secret: Boolean = false) = EditText(this).apply {
-        setText(value)
-        isSingleLine = true
-        inputType = if (secret) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-        else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-    }
-
-    private fun form(vararg rows: View) = ScrollView(this).apply {
-        addView(LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(8), dp(16), 0)
-            rows.forEach { addView(it) }
-        })
-    }
-
-    private fun outlined(label: String, color: Int) = TextView(this).apply {
-        text = label
-        setTextColor(color)
-        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        gravity = Gravity.CENTER
-        setPadding(dp(8), dp(10), dp(8), dp(10))
-        background = GradientDrawable().apply { cornerRadius = dp(4).toFloat(); setStroke(dp(2), color) }
-    }
-
-    private fun showMenu() {
-        val s = service ?: return
-        val ssid = input(s.ssid)
-        val pass = input(s.password, secret = true)
-        val host = input(s.host)
-        val startOffset = videoOffset
-        val offset = SeekBar(this).apply {
-            max = 100
-            progress = (videoOffset * 100).toInt()
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
-                    videoOffset = p / 100f; applyOffset() // live preview
-                }
-                override fun onStartTrackingTouch(sb: SeekBar) {}
-                override fun onStopTrackingTouch(sb: SeekBar) {}
-            })
-        }
-        val flip = CheckBox(this).apply { isChecked = prefs().getBoolean(KEY_FLIP, false) }
-        val videoFlip = CheckBox(this).apply { isChecked = s.videoFlip }
-        val demo = CheckBox(this).apply { isChecked = s.demo }
-        val piFan = s.piFanIndicator
-        val fanStart = CheckBox(this).apply {
-            isChecked = piFan ?: false
-            isEnabled = piFan != null // setting lives on the Pi: needs a link
-        }
-        val piNight = s.piNightExposure
-        val nightExp = CheckBox(this).apply {
-            isChecked = piNight ?: false
-            isEnabled = piNight != null
-        }
-        val piWifi = outlined("SET", Color.LTGRAY)
-        val shutdown = outlined("SHUT DOWN", Color.rgb(230, 60, 60))
-        val revert = { videoOffset = startOffset; applyOffset() }
-
-        val dlg = dialog()
-            .setTitle("MENU")
-            .setView(
-                form(
-                    row("SSID", ssid, "Network name of the Pi. Leave blank to use the Wi-Fi the phone is already on (bench test)."),
-                    row("PASSWORD", pass, "WPA2 password of the Pi network."),
-                    row("PI ADDRESS", host, "IP address of the Pi. Default ${LinkService.DEFAULT_HOST} on its own network."),
-                    row("VIDEO POS", offset, "Moves the video left or right. Left end puts the video on the left edge."),
-                    row("FLIP 180", flip, "Rotates the whole display 180 degrees to match the phone mount."),
-                    row("VIDEO FLIP", videoFlip, "Rotates only the video 180 degrees. Use when the camera is mounted upside down."),
-                    row("DEMO", demo, "Simulated feed and contacts for training. Stops the network search."),
-                    row("NIGHT EXP", nightExp, "Low light: the camera may lengthen exposure up to 1/15 s when the scene is dark. Brighter image, frame rate drops toward 15 FPS and delay rises about 30 MS only while dark. Stored on the Pi. Requires an active link to change."),
-                    row("FAN START", fanStart, "Pi spins its fan in two short bursts when its Wi-Fi is up after power-on, so you can hear it is ready. Stored on the Pi. Requires an active link to change."),
-                    row("PI WI-FI", piWifi, "Changes the SSID and password broadcast by the Pi. Requires an active link."),
-                    row("LINK", shutdown, "Stops the link, alerts and background service. Reopen the app to restart."),
-                )
-            )
-            .setPositiveButton("SAVE") { _, _ ->
-                prefs().edit().putBoolean(KEY_FLIP, flip.isChecked).putFloat(KEY_OFFSET, videoOffset).apply()
-                applyOrientation()
-                // Pi-side settings first, over the current link
-                if (piFan != null && fanStart.isChecked != piFan) s.setFanIndicator(fanStart.isChecked)
-                if (piNight != null && nightExp.isChecked != piNight) s.setNightExposure(nightExp.isChecked)
-                s.videoFlip = videoFlip.isChecked
-                s.saveSettings(ssid.text.toString(), pass.text.toString(), host.text.toString())
-                s.setDemo(demo.isChecked)
-                refresh()
-            }
-            .setNegativeButton("CANCEL") { _, _ -> revert() }
-            .setOnCancelListener { revert() }
-            .show()
-        piWifi.setOnClickListener { dlg.dismiss(); revert(); showChangePiWifi() }
-        shutdown.setOnClickListener { dlg.dismiss(); revert(); confirmShutdown() }
-    }
-
-    private fun confirmShutdown() {
-        dialog()
-            .setTitle("SHUT DOWN LINK")
-            .setMessage("Stops video, detection alerts and reconnection.")
-            .setPositiveButton("SHUT DOWN") { _, _ ->
-                stopService(Intent(this, LinkService::class.java))
-                finishAndRemoveTask()
-            }
-            .setNegativeButton("CANCEL", null)
-            .show()
-    }
-
-    /** Rename the Pi's network or change its password over the live link. */
-    private fun showChangePiWifi() {
-        val s = service ?: return
-        val ssid = input(s.ssid)
-        val pass = input("", secret = true)
-        val dlg = dialog()
-            .setTitle("PI WI-FI")
-            .setView(
-                form(
-                    row("NEW SSID", ssid, "New network name, 1 to 32 characters. The Pi restarts its Wi-Fi and this phone follows automatically."),
-                    row("NEW PASSWORD", pass, "8 to 63 characters."),
-                )
-            )
-            .setPositiveButton("APPLY", null)
-            .setNegativeButton("CANCEL", null)
-            .show()
-        dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { btn ->
-            val newSsid = ssid.text.toString().trim()
-            val newPass = pass.text.toString()
-            when {
-                newSsid.isEmpty() || newSsid.toByteArray().size > 32 -> ssid.error = "1-32 CHARACTERS"
-                newPass.length !in 8..63 || !newPass.all { it.code in 32..126 } -> pass.error = "8-63 CHARACTERS"
-                else -> {
-                    btn.isEnabled = false
-                    s.changePiWifi(newSsid, newPass) { ok, msg ->
-                        Toast.makeText(
-                            this,
-                            if (ok) "PI WI-FI SET: $newSsid. RECONNECTING" else "FAILED: ${msg.uppercase()}",
-                            Toast.LENGTH_LONG,
-                        ).show()
-                        if (ok) dlg.dismiss() else btn.isEnabled = true
-                    }
-                }
-            }
-        }
+        override var flip: Boolean
+            get() = prefs().getBoolean(KEY_FLIP, false)
+            set(v) { prefs().edit().putBoolean(KEY_FLIP, v).apply() }
+        override fun applyOffset() = this@MainActivity.applyOffset()
+        override fun applyOrientation() = this@MainActivity.applyOrientation()
+        override fun refreshMain() = refresh()
     }
 
     // ------------------------------------------------------------------ service callbacks
@@ -419,6 +267,7 @@ class MainActivity : Activity(), LinkService.Listener {
             LinkService.Phase.NO_PI -> "NO PI  SRCH $net" to AMBER
             LinkService.Phase.NO_WIFI -> "NO LINK  SRCH $net" to RED
         }
+        if (menu.isOpen) menu.refresh()
         statusText.text = if (state.bleNote != null) "$text\n${state.bleNote}" else text
         statusText.setTextColor(c(color))
         overlay.stale = state.phase != LinkService.Phase.LIVE
@@ -431,6 +280,11 @@ class MainActivity : Activity(), LinkService.Listener {
         } else {
             contactText.visibility = View.GONE
         }
+    }
+
+    @Deprecated("pre-33 back handling")
+    override fun onBackPressed() {
+        if (::menu.isInitialized && menu.isOpen) menu.close() else moveTaskToBack(true)
     }
 
     override fun onBoxes(boxes: List<Box>) {

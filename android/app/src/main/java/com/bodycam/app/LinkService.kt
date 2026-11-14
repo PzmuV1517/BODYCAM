@@ -351,9 +351,16 @@ class LinkService : Service() {
         }
     }
 
+    /** BUZZ TEST tile: play the contact pattern regardless of settings. */
+    fun testAlert() = vibrate(double = false)
+
     private fun alert(now: Long, double: Boolean) {
         if (!alertsEnabled || !aiEnabled) return
         lastAlertAt = now
+        vibrate(double)
+    }
+
+    private fun vibrate(double: Boolean) {
         val timings = if (double) longArrayOf(0, 90, 70, 90, 70, 90) else longArrayOf(0, 120, 80, 120)
         val effect = VibrationEffect.createWaveform(timings, -1)
         // Alarm usage so it still buzzes with the phone on silent / DND.
