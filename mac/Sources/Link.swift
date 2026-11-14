@@ -22,7 +22,9 @@ enum Proto {
         UInt32(b[o]) << 24 | UInt32(b[o + 1]) << 16 | UInt32(b[o + 2]) << 8 | UInt32(b[o + 3])
     }
     static func be32(_ v: UInt32) -> [UInt8] { [UInt8(v >> 24 & 0xFF), UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] }
-    static func helloPacket(_ seq: UInt32, _ wantAi: Bool, _ wantFan: UInt8) -> [UInt8] { [hello] + be32(seq) + [wantAi ? 1 : 0, wantFan] }
+    static func helloPacket(_ seq: UInt32, _ wantAi: Bool, _ wantFan: UInt8, _ wantNight: UInt8) -> [UInt8] {
+        [hello] + be32(seq) + [wantAi ? 1 : 0, wantFan, wantNight]
+    }
     /// Signed a - b of two u32 ms clocks.
     static func diffU32(_ a: UInt32, _ b: UInt32) -> Int64 { Int64(Int32(bitPattern: a &- b)) }
     static func setWifiPacket(_ id: UInt32, _ ssid: String, _ pass: String) -> [UInt8] {
@@ -34,7 +36,7 @@ enum Proto {
 /// Person box, coordinates 0..1 of the video frame.
 struct Box { let x1, y1, x2, y2, score: CGFloat }
 
-struct PiStatus { let aiEnabled, hailoOk: Bool; let encFps, inferFps, tempC: Int; var fanIndicator: Bool? = nil }
+struct PiStatus { let aiEnabled, hailoOk: Bool; let encFps, inferFps, tempC: Int; var fanIndicator: Bool? = nil; var nightExposure: Bool? = nil }
 
 func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
 
@@ -54,6 +56,7 @@ final class StreamClient {
     private var running = true
     private var _wantAi = true
     private var _wantFan: UInt8 = 255
+    private var _wantNight: UInt8 = 255
     private var offsetSamples: [(rtt: Int, offset: UInt32)] = []
     private var _clockOffset: UInt32?
     private var needKey = true
@@ -76,6 +79,10 @@ final class StreamClient {
     var wantFan: UInt8 {
         get { lock.withLock { _wantFan } }
         set { lock.withLock { _wantFan = newValue } }
+    }
+    var wantNight: UInt8 {
+        get { lock.withLock { _wantNight } }
+        set { lock.withLock { _wantNight = newValue } }
     }
     /// Pi clock minus this Mac's uptime clock, ms mod 2^32 (from the fastest status replies).
     var clockOffsetMs: UInt32? { lock.withLock { _clockOffset } }
@@ -146,13 +153,13 @@ final class StreamClient {
             if var a = addr {
                 seq &+= 1
                 let now = uptime()
-                let (ai, fanWish, req, key): (Bool, UInt8, (id: UInt32, packet: [UInt8], deadline: Double, done: (Bool, String) -> Void)?, Bool) = lock.withLock {
+                let (ai, fanWish, nightWish, req, key): (Bool, UInt8, UInt8, (id: UInt32, packet: [UInt8], deadline: Double, done: (Bool, String) -> Void)?, Bool) = lock.withLock {
                     sentAt[Int(seq & 63)] = now
                     var k = false
                     if needKey && now - lastKeyReq > 0.3 { lastKeyReq = now; k = true }
-                    return (_wantAi, _wantFan, wifiReq, k)
+                    return (_wantAi, _wantFan, _wantNight, wifiReq, k)
                 }
-                send(Proto.helloPacket(seq, ai, fanWish), &a)
+                send(Proto.helloPacket(seq, ai, fanWish, nightWish), &a)
                 if let r = req {
                     if now > r.deadline {
                         lock.withLock { wifiReq = nil }
@@ -243,6 +250,7 @@ final class StreamClient {
             }
             st.fanIndicator = b[14] != 0
         }
+        if b.count >= 16 { st.nightExposure = b[15] != 0 }
         cb.onStatus(st, rtt)
     }
 
@@ -329,6 +337,12 @@ final class LinkModel {
     private var delays: [Int64] = []
     private var lastDelayAt = 0.0
     var piFanIndicator: Bool? { piStatus?.fanIndicator }
+    var piNightExposure: Bool? { piStatus?.nightExposure }
+
+    func setNightExposure(_ on: Bool) {
+        client?.wantNight = on ? 1 : 0
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.client?.wantNight = 255 }
+    }
 
     func setFanIndicator(_ on: Bool) {
         client?.wantFan = on ? 1 : 0 // sent in HELLOs for a few seconds, then back to "leave it"

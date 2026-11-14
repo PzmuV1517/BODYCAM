@@ -306,6 +306,11 @@ class MainActivity : Activity(), LinkService.Listener {
             isChecked = piFan ?: false
             isEnabled = piFan != null // setting lives on the Pi: needs a link
         }
+        val piNight = s.piNightExposure
+        val nightExp = CheckBox(this).apply {
+            isChecked = piNight ?: false
+            isEnabled = piNight != null
+        }
         val piWifi = outlined("SET", Color.LTGRAY)
         val shutdown = outlined("SHUT DOWN", Color.rgb(230, 60, 60))
         val revert = { videoOffset = startOffset; applyOffset() }
@@ -321,6 +326,7 @@ class MainActivity : Activity(), LinkService.Listener {
                     row("FLIP 180", flip, "Rotates the whole display 180 degrees to match the phone mount."),
                     row("VIDEO FLIP", videoFlip, "Rotates only the video 180 degrees. Use when the camera is mounted upside down."),
                     row("DEMO", demo, "Simulated feed and contacts for training. Stops the network search."),
+                    row("NIGHT EXP", nightExp, "Low light: the camera may lengthen exposure up to 1/15 s when the scene is dark. Brighter image, frame rate drops toward 15 FPS and delay rises about 30 MS only while dark. Stored on the Pi. Requires an active link to change."),
                     row("FAN START", fanStart, "Pi spins its fan in two short bursts when its Wi-Fi is up after power-on, so you can hear it is ready. Stored on the Pi. Requires an active link to change."),
                     row("PI WI-FI", piWifi, "Changes the SSID and password broadcast by the Pi. Requires an active link."),
                     row("LINK", shutdown, "Stops the link, alerts and background service. Reopen the app to restart."),
@@ -332,6 +338,7 @@ class MainActivity : Activity(), LinkService.Listener {
                 s.saveSettings(ssid.text.toString(), pass.text.toString(), host.text.toString())
                 s.setDemo(demo.isChecked)
                 if (piFan != null && fanStart.isChecked != piFan) s.setFanIndicator(fanStart.isChecked)
+                if (piNight != null && nightExp.isChecked != piNight) s.setNightExposure(nightExp.isChecked)
                 s.videoFlip = videoFlip.isChecked
                 refresh()
             }

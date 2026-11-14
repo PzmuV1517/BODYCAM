@@ -103,11 +103,22 @@ class LinkService : Service() {
     /** Pi's fan startup signal setting as last reported (null = unknown / not connected). */
     val piFanIndicator: Boolean? get() = piStatus?.fanIndicator
 
+    val piNightExposure: Boolean? get() = piStatus?.nightExposure
+    private var nightWishReset: Runnable? = null
+
+    // Pi-side settings: the wish rides in every HELLO for a few seconds, then back to "leave it".
     fun setFanIndicator(on: Boolean) {
         val c = client ?: return
-        c.wantFan = if (on) 1 else 0 // sent in every HELLO for a few seconds, then back to "leave it"
+        c.wantFan = if (on) 1 else 0
         fanWishReset?.let { main.removeCallbacks(it) }
         fanWishReset = Runnable { client?.wantFan = 255 }.also { main.postDelayed(it, 3000) }
+    }
+
+    fun setNightExposure(on: Boolean) {
+        val c = client ?: return
+        c.wantNight = if (on) 1 else 0
+        nightWishReset?.let { main.removeCallbacks(it) }
+        nightWishReset = Runnable { client?.wantNight = 255 }.also { main.postDelayed(it, 3000) }
     }
 
     private fun onDisplayed(captureMs: Long, displayedAt: Long) {

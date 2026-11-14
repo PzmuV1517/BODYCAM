@@ -91,6 +91,10 @@ final class MenuController {
         let fanStart = NSButton(checkboxWithTitle: "", target: nil, action: nil)
         fanStart.state = piFan == true ? .on : .off
         fanStart.isEnabled = piFan != nil // stored on the Pi: needs a link
+        let piNight = model.piNightExposure
+        let nightExp = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+        nightExp.state = piNight == true ? .on : .off
+        nightExp.isEnabled = piNight != nil
         let piWifi = ClosureButton(title: "SET") { [weak self] in
             self?.app.screen.videoOffset = startOffset
             self?.close()
@@ -117,6 +121,7 @@ final class MenuController {
             model.saveSettings(ssid: ssid.stringValue, password: pass.stringValue, host: host.stringValue)
             model.setDemo(demo.state == .on)
             if let piFan, (fanStart.state == .on) != piFan { model.setFanIndicator(fanStart.state == .on) }
+            if let piNight, (nightExp.state == .on) != piNight { model.setNightExposure(nightExp.state == .on) }
             app.screen.refresh()
             close()
         }
@@ -130,6 +135,7 @@ final class MenuController {
             row("FLIP 180", flip, "Rotates the whole display 180 degrees to match the phone mount."),
             row("VIDEO FLIP", videoFlip, "Rotates only the video 180 degrees. Use when the camera is mounted upside down."),
             row("DEMO", demo, "Simulated feed and contacts for training. Stops the network search."),
+            row("NIGHT EXP", nightExp, "Low light: the camera may lengthen exposure up to 1/15 s when the scene is dark. Brighter image, frame rate drops toward 15 FPS and delay rises about 30 MS only while dark. Stored on the Pi. Requires an active link to change."),
             row("FAN START", fanStart, "Pi spins its fan in two short bursts when its Wi-Fi is up after power-on, so you can hear it is ready. Stored on the Pi. Requires an active link to change."),
             row("PI WI-FI", piWifi, "Changes the SSID and password broadcast by the Pi. Requires an active link."),
             row("LINK", shutdown, "Stops the link and alerts and closes the app."),

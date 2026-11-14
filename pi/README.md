@@ -57,7 +57,7 @@ stream with an immediate keyframe. If no `HELLO` for 2 s, the Pi stops sending (
 
 | type | layout | meaning |
 |---|---|---|
-| `0x10` HELLO | `u8 type, u32 seq, u8 want_ai, u8 want_fan_signal` | heartbeat; `want_*` 0=off 1=on 255=no change. Applied when a viewer's wish changes, so a lost toggle self-heals |
+| `0x10` HELLO | `u8 type, u32 seq, u8 want_ai, u8 want_fan_signal, u8 want_night_exposure` | heartbeat; `want_*` 0=off 1=on 255=no change. Applied when a viewer's wish changes, so a lost toggle self-heals |
 | `0x11` KEYFRAME_REQ | `u8 type` | phone lost a chunk; Pi sends IDR (max 4/s) |
 | `0x12` SET_WIFI | `u8 type, u32 req_id, u8 ssid_len, ssid, u8 pass_len, pass` | change the Pi AP's SSID/password (only if the `bodycam-ap` profile exists). Resent until acked; applied 1 s after the ack, then the AP restarts |
 
@@ -68,7 +68,7 @@ stream with an immediate keyframe. If no `HELLO` for 2 s, the Pi stops sending (
 | `0x01` VIDEO | `u8 type, u32 frame_id, u16 chunk_idx, u16 chunk_count, u8 flags, u32 capture_ms, payload` | H.264 Annex-B access unit split into ≤1200-byte chunks. `frame_id` is consecutive per encoded frame (a gap = a whole frame lost). `flags` bit0 = keyframe (SPS/PPS included). Missing chunk → drop frame, send KEYFRAME_REQ |
 | `0x02` DETECT | `u8 type, u32 frame_id, u8 ai_enabled, u8 count, count × (u16 x1, u16 y1, u16 x2, u16 y2, u8 score)` | person boxes, coords 0..65535 of the frame, score 0..255. Sent per inference only while AI is on (`count` may be 0) |
 | `0x04` WIFI_ACK | `u8 type, u32 req_id, u8 ok, u8 msg_len, msg` | result of SET_WIFI |
-| `0x03` STATUS | `u8 type, u32 seq, u8 ai_enabled, u8 hailo_ok, u8 enc_fps, u8 infer_fps, u8 cpu_temp_c, u32 pi_now_ms, u8 fan_signal` | reply to every HELLO (`seq` echoed: RTT / link alive). `pi_now_ms` + RTT sync the viewer clock to the Pi |
+| `0x03` STATUS | `u8 type, u32 seq, u8 ai_enabled, u8 hailo_ok, u8 enc_fps, u8 infer_fps, u8 cpu_temp_c, u32 pi_now_ms, u8 fan_signal, u8 night_exposure` | reply to every HELLO (`seq` echoed: RTT / link alive). `pi_now_ms` + RTT sync the viewer clock to the Pi |
 
 Vibration alerts are decided on the phone from DETECT packets (so the alert toggle is phone-only).
 
@@ -103,3 +103,8 @@ and reboots once if the fan curve changed.
 ## Fan
 
 Quiet curve in `fan-quiet.conf`: off below 65 C, gentle to 78 C, full at 82 C.
+
+## Night exposure
+
+Setting `night_exposure` (Pi, `/etc/bodycam/settings.json`, default off). On: camera frame duration may
+stretch from 1/30 s to 1/15 s when auto-exposure needs it (dark scenes only). Applied live.

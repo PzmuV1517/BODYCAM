@@ -53,9 +53,10 @@ VIDEO_HDR = struct.Struct("!BIHHBI")    # type, frame_id, chunk_idx, chunk_count
 DETECT_HDR = struct.Struct("!BIBB")     # type, frame_id, ai_enabled, count
 BOX = struct.Struct("!HHHHB")           # x1, y1, x2, y2 (0..65535 of frame), score (0..255)
 # type, echoed seq, ai_enabled, hailo_ok, enc_fps, infer_fps, cpu_temp_c, pi_now_ms, fan_indicator
-STATUS = struct.Struct("!BIBBBBBIB")
+STATUS = struct.Struct("!BIBBBBBIBB")  # ..., fan_indicator, night_exposure
 HELLO = struct.Struct("!BIB")           # type, seq, want_ai (0=off, 1=on, 255=don't care)
 HELLO_FAN = struct.Struct("!BIBB")      # + want_fan_indicator (0/1/255), newer clients
+HELLO_NIGHT = struct.Struct("!BIBBB")   # + want_night_exposure (0/1/255)
 
 
 def now_ms():
@@ -152,6 +153,8 @@ class State:
         self.ai_enabled = args.ai_default
         self.hailo_ok = False
         self.fan_indicator = fan.indicator_enabled()
+        self.night_exposure = bool(fan.load_settings().get("night_exposure", False))
+        self.cam = None
         self.force_idr = threading.Event()
         self.last_idr = 0.0
         self.last_frame = time.monotonic()
@@ -188,6 +191,7 @@ def net_loop(st):
     sock = st.link.sock
     last_want = {}
     last_fan = {}
+    last_night = {}
     while st.running:
         r, _, _ = select.select([sock], [], [], 0.5)
         if not r:
@@ -205,6 +209,15 @@ def net_loop(st):
                 st.force_idr.set()
                 last_want.pop(addr, None)
                 last_fan.pop(addr, None)
+                last_night.pop(addr, None)
+            want_night = data[7] if len(data) >= HELLO_NIGHT.size else 255
+            if want_night in (0, 1) and last_night.get(addr) != want_night:
+                last_night[addr] = want_night
+                if bool(want_night) != st.night_exposure:
+                    st.night_exposure = bool(want_night)
+                    fan.save_setting("night_exposure", st.night_exposure)
+                    apply_exposure(st)
+                    log.info("night exposure %s (by %s)", "ON" if st.night_exposure else "OFF", addr[0])
             want_fan = data[6] if len(data) >= HELLO_FAN.size else 255
             if want_fan in (0, 1) and last_fan.get(addr) != want_fan:
                 last_fan[addr] = want_fan
@@ -220,7 +233,7 @@ def net_loop(st):
                     log.info("AI %s (by %s)", "ON" if st.ai_enabled else "OFF", addr[0])
             st.link.send(STATUS.pack(PKT_STATUS, seq, st.ai_enabled, st.hailo_ok,
                                      min(st.enc_fps, 255), min(st.infer_fps, 255), cpu_temp(),
-                                     now_ms(), st.fan_indicator), addr)
+                                     now_ms(), st.fan_indicator, st.night_exposure), addr)
         elif kind == PKT_SET_WIFI:
             handle_set_wifi(st, data, addr)
         elif kind == PKT_KEYFRAME_REQ:
@@ -457,12 +470,27 @@ def watchdog_loop(st):
             os._exit(3)
 
 
-def open_camera(a, lores_size):
+def frame_limits(a, night):
+    """Normal: fixed 1/fps frames (lowest delay). Night: the auto-exposure may stretch frames to
+    2/fps (half the frame rate, twice the light) but only when the scene is actually dark."""
+    frame_us = int(1_000_000 / a.fps)
+    return (frame_us, frame_us * 2 if night else frame_us)
+
+
+def apply_exposure(st):
+    if st.cam is not None:
+        try:
+            st.cam.set_controls({"FrameDurationLimits": frame_limits(st.args, st.night_exposure)})
+        except Exception:
+            log.exception("could not change exposure limits")
+
+
+def open_camera(a, lores_size, night=False):
     from picamera2 import Picamera2
 
     cam = Picamera2()
     frame_us = int(1_000_000 / a.fps)
-    controls = {"FrameDurationLimits": (frame_us, frame_us)}  # fixed fps: never slow down in the dark
+    controls = {"FrameDurationLimits": frame_limits(a, night)}
     try:
         from libcamera import controls as lc
         controls["AfMode"] = lc.AfModeEnum.Continuous
@@ -534,7 +562,8 @@ def main():
         _, model_w, _ = hailo.get_input_shape()
         lores_size = (model_w, (model_w * a.height // a.width) // 2 * 2)  # same aspect, letterboxed later
 
-    cam = open_camera(a, lores_size)
+    cam = open_camera(a, lores_size, st.night_exposure)
+    st.cam = cam
 
     def stop(*_):
         # Exit right away: closing the Hailo while an inference is running can deadlock, and the

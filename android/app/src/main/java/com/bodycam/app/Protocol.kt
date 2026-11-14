@@ -16,6 +16,7 @@ object Proto {
     const val BOX_SIZE = 9     // u16 x1, y1, x2, y2, u8 score
     const val STATUS_SIZE = 10 // u8 type, u32 seq, u8 ai, hailo_ok, enc_fps, infer_fps, temp
     const val STATUS_EXT = 15  // + u32 pi_now_ms, u8 fan_indicator
+    const val STATUS_EXT2 = 16 // + u8 night_exposure
 
     fun u8(b: ByteArray, o: Int) = b[o].toInt() and 0xFF
     fun u16(b: ByteArray, o: Int) = (u8(b, o) shl 8) or u8(b, o + 1)
@@ -33,11 +34,12 @@ object Proto {
     }
 
     /** wantFan: 0/1 = set the Pi's fan startup signal, 255 = leave it. */
-    fun hello(seq: Int, wantAi: Boolean, wantFan: Int) = byteArrayOf(
+    fun hello(seq: Int, wantAi: Boolean, wantFan: Int, wantNight: Int) = byteArrayOf(
         HELLO.toByte(),
         (seq ushr 24).toByte(), (seq ushr 16).toByte(), (seq ushr 8).toByte(), seq.toByte(),
         if (wantAi) 1 else 0,
         wantFan.toByte(),
+        wantNight.toByte(),
     )
 
     /** Signed difference a - b of two u32 millisecond clocks (handles wrap-around). */
@@ -57,4 +59,5 @@ data class PiStatus(
     val inferFps: Int,
     val tempC: Int,
     val fanIndicator: Boolean?, // null = Pi too old to report it
+    val nightExposure: Boolean? = null,
 )

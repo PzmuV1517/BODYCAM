@@ -97,6 +97,7 @@ def status():
     ips = run("hostname -I", 5)[1].strip()
     return (f"ap={'up' if ap_up else 'down'}\nssid={ssid}\nchannel={chan}\nclients={clients}\n"
             f"service={svc}\ntemp_c={temp}\nfan_rpm={fan_rpm}\nfan_indicator={'on' if fan.indicator_enabled() else 'off'}\n"
+            f"night_exposure={'on' if fan.load_settings().get('night_exposure') else 'off'}\n"
             f"uptime={up}\nip={ips}\n")
 
 
