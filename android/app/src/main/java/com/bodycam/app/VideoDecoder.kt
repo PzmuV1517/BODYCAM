@@ -26,6 +26,20 @@ class VideoDecoder(
     private class Frame(val data: ByteArray, val key: Boolean, val captureMs: Long)
     @Volatile private var lastRenderCallback = 0L
 
+    // The render callback's clock base differs between devices (on some it's not System.nanoTime),
+    // so calibrate it: a frame can't be shown before we release it, hence
+    // offset >= releaseTime - renderTime for every frame; the max over recent frames is tight.
+    private val releasedAt = java.util.concurrent.ConcurrentHashMap<Long, Long>() // ptsUs -> release ns (elapsedRealtime base)
+    private val calib = ArrayDeque<Long>()
+    private fun renderedAt(ptsUs: Long, renderNs: Long): Long? {
+        val rel = releasedAt.remove(ptsUs) ?: return null
+        synchronized(calib) {
+            calib.addLast(rel - renderNs)
+            if (calib.size > 60) calib.removeFirst()
+            return (renderNs + calib.max()) / 1_000_000
+        }
+    }
+
     private val queue = ArrayBlockingQueue<Frame>(6)
     @Volatile private var running = true
     @Volatile private var waitKey = true
@@ -70,8 +84,7 @@ class VideoDecoder(
         // Exact on-screen time of each frame (System.nanoTime base) -> delay readout.
         codec.setOnFrameRenderedListener({ _, ptsUs, nanoTime ->
             lastRenderCallback = SystemClock.elapsedRealtime()
-            val bootMs = (nanoTime + (SystemClock.elapsedRealtimeNanos() - System.nanoTime())) / 1_000_000
-            onDisplayed(ptsUs / 1000, bootMs)
+            renderedAt(ptsUs, nanoTime)?.let { onDisplayed(ptsUs / 1000, it) }
         }, android.os.Handler(android.os.Looper.getMainLooper()))
         codec.start()
         return codec
@@ -104,6 +117,8 @@ class VideoDecoder(
                         val out = codec.dequeueOutputBuffer(info, 0)
                         when {
                             out >= 0 -> {
+                                releasedAt[info.presentationTimeUs] = SystemClock.elapsedRealtimeNanos()
+                                if (releasedAt.size > 120) releasedAt.clear()
                                 codec.releaseOutputBuffer(out, true)
                                 // Fallback if this decoder never reports render times: ~1 vsync later.
                                 val now = SystemClock.elapsedRealtime()
