@@ -386,11 +386,14 @@ final class LinkModel {
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
     }
 
-    func saveSettings(ssid: String, password: String, host: String) {
-        d.set(ssid.trimmingCharacters(in: .whitespaces), forKey: "ssid")
-        d.set(password, forKey: "pass")
-        let h = host.trimmingCharacters(in: .whitespaces)
-        d.set(h.isEmpty ? LinkModel.defaultHost : h, forKey: "host")
+    func saveSettings(ssid newSsid: String, password newPass: String, host newHost: String) {
+        let s = newSsid.trimmingCharacters(in: .whitespaces)
+        var h = newHost.trimmingCharacters(in: .whitespaces)
+        if h.isEmpty { h = LinkModel.defaultHost }
+        if s == ssid && newPass == password && h == host { return } // unchanged: keep the link
+        d.set(s, forKey: "ssid")
+        d.set(newPass, forKey: "pass")
+        d.set(h, forKey: "host")
         reconnect()
     }
 

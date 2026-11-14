@@ -118,10 +118,11 @@ final class MenuController {
             model.flip = flip.state == .on
             model.videoFlip = videoFlip.state == .on
             app.holder.flip = model.flip
-            model.saveSettings(ssid: ssid.stringValue, password: pass.stringValue, host: host.stringValue)
-            model.setDemo(demo.state == .on)
+            // Pi-side settings first, over the current link
             if let piFan, (fanStart.state == .on) != piFan { model.setFanIndicator(fanStart.state == .on) }
             if let piNight, (nightExp.state == .on) != piNight { model.setNightExposure(nightExp.state == .on) }
+            model.saveSettings(ssid: ssid.stringValue, password: pass.stringValue, host: host.stringValue)
+            model.setDemo(demo.state == .on)
             app.screen.refresh()
             close()
         }

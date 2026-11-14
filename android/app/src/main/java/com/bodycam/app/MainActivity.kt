@@ -335,11 +335,12 @@ class MainActivity : Activity(), LinkService.Listener {
             .setPositiveButton("SAVE") { _, _ ->
                 prefs().edit().putBoolean(KEY_FLIP, flip.isChecked).putFloat(KEY_OFFSET, videoOffset).apply()
                 applyOrientation()
-                s.saveSettings(ssid.text.toString(), pass.text.toString(), host.text.toString())
-                s.setDemo(demo.isChecked)
+                // Pi-side settings first, over the current link
                 if (piFan != null && fanStart.isChecked != piFan) s.setFanIndicator(fanStart.isChecked)
                 if (piNight != null && nightExp.isChecked != piNight) s.setNightExposure(nightExp.isChecked)
                 s.videoFlip = videoFlip.isChecked
+                s.saveSettings(ssid.text.toString(), pass.text.toString(), host.text.toString())
+                s.setDemo(demo.isChecked)
                 refresh()
             }
             .setNegativeButton("CANCEL") { _, _ -> revert() }
