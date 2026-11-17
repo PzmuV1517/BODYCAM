@@ -118,7 +118,7 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
                     svc?.fanOverride?.let { svc?.setFanOverride(minOf(100, it + 10)) }
                 },
             ),
-            "ALERTS" to listOf(
+            "APP" to listOf(
                 Spec("VIB", "Vibration on contact (double buzz, triple when more people appear) and one long buzz when the link is lost in the background.",
                     { onOff(svc?.alertsEnabled == true) }, { st(svc?.alertsEnabled == true) }) {
                     svc?.let { it.alertsEnabled = !it.alertsEnabled }; host.refreshMain()
@@ -135,7 +135,12 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
                     { "RUN" }, { State.NEUTRAL }) {
                     svc?.testNotify()
                 },
-                null, null,
+                Spec("UPDATE", "Checks GitHub for a newer BodyCam app (needs internet: mobile data or normal Wi-Fi). Tap again to download and install it. Android asks you to confirm.",
+                    { Updater.label(activity) },
+                    { if (Updater.phase == Updater.Phase.AVAILABLE) State.ON else State.NEUTRAL }) {
+                    Updater.tap(activity) { refresh() }
+                },
+                null,
             ),
             "LINK" to listOf(
                 Spec("SSID", "Network name of the Pi. Empty = use the Wi-Fi the phone is already on (bench test). Tap to edit.",
