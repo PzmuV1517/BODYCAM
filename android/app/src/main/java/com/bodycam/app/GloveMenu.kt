@@ -103,7 +103,14 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
                     { svc?.piFanIndicator?.let { st(it) } ?: State.DISABLED }) {
                     svc?.piFanIndicator?.let { svc?.setFanIndicator(!it) }
                 },
-                null,
+                Spec("PI FW", "Hold: updates the Pi software from the latest GitHub release. Downloads over mobile data or normal Wi-Fi, then sends it to the Pi (now if linked, otherwise automatically next time you connect). The camera restarts for a few seconds; a failed update rolls back by itself.",
+                    { PiUpdater.label(activity, svc?.piNetworkLinked == true) },
+                    { when (PiUpdater.phase) {
+                        PiUpdater.Phase.READY, PiUpdater.Phase.DONE -> State.ON
+                        else -> State.NEUTRAL } },
+                    holdMs = 1500) {
+                    svc?.let { PiUpdater.tap(it) { refresh() } }
+                },
                 Spec("FAN -", "Lowers the fixed fan speed by 10%. Reaching 0% ends the override and the fan goes back to the automatic quiet curve.",
                     { "-10%" }, { if (svc?.fanOverride == null) State.DISABLED else State.NEUTRAL }) {
                     svc?.fanOverride?.let { if (it > 0) svc?.setFanOverride(it - 10) }

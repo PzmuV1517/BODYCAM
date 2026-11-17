@@ -117,3 +117,12 @@ stretch from 1/30 s to 1/15 s when auto-exposure needs it (dark scenes only). Ap
 switching the thermal zone to `disabled` and writing the fan PWM. Cancelled automatically at 80 C, when the
 video service stops, and when it starts (so it never survives a restart or reboot).
 BLE: `fan override 0-100|auto`.
+
+## Updating the Pi from the phone (PI FW)
+
+Each GitHub release carries `bodycam-pi-X.tar.gz` (this `pi/` folder). The phone downloads it over a
+validated internet network (mobile data even while on the Pi's Wi-Fi, or normal Wi-Fi), then uploads
+it to the Pi on TCP 5601: login is HMAC-SHA256 of a nonce with the Wi-Fi password, the bundle is
+SHA-256 checked, extracted safely, and `update.sh` installs it in a separate systemd unit. If the
+video service is not running 10 s after the restart, the previous version is restored.
+`tools/deploy-pi.sh` uses the same `update.sh`. Version in `pi/VERSION` (`/opt/bodycam/VERSION`).

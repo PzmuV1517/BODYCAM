@@ -182,6 +182,10 @@ class LinkService : Service() {
         get() = prefs.getBoolean(KEY_NOTIFY, true)
         set(v) { prefs.edit().putBoolean(KEY_NOTIFY, v).apply() }
 
+    /** The Pi's Wi-Fi network (sockets to the Pi must be bound to it) and whether the Pi answers. */
+    val piNetwork: Network? get() = network
+    val piNetworkLinked: Boolean get() = !demo && client != null && SystemClock.elapsedRealtime() - lastStatusAt < 1500
+
     /** Set by the activity: true while the live view is on screen. */
     @Volatile var uiVisible = false
 
@@ -544,6 +548,7 @@ class LinkService : Service() {
                 ble?.check(password, ssid)
             }
             watchLink(phase, now)
+            PiUpdater.onLinkTick(this@LinkService)
             if (now - lastBoxesAt > 500 && persons != 0) {
                 persons = 0
                 listener?.onBoxes(emptyList())

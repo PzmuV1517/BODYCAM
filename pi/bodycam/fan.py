@@ -127,3 +127,19 @@ def set_override(pct):
     if pwm:
         with open(pwm, "w") as f:
             f.write(str(round(pct * 255 / 100)))
+
+
+def ap_password():
+    """Secret for BLE logins and phone firmware uploads: the AP's WPA2 password (or an override file)."""
+    try:
+        with open("/etc/bodycam/ble-secret") as f:
+            v = f.read().strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    try:
+        return subprocess.run(["nmcli", "-s", "-g", "802-11-wireless-security.psk", "connection", "show", AP_CONNECTION],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return ""

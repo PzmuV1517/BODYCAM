@@ -15,6 +15,11 @@ See ../README.md for the wire protocol.
 """
 import argparse
 import errno
+import hashlib
+import hmac
+import secrets
+import tarfile
+import tempfile
 import logging
 import os
 import select
@@ -457,6 +462,90 @@ def send_snapshot(st, addr, req_id):
     log.info("snapshot %d bytes -> %s", len(jpg), addr[0])
 
 
+# ---------------------------------------------------------------- firmware update from the phone
+UPDATE_PORT = 5601
+UPDATE_MAX = 30 * 1024 * 1024
+
+
+def update_server(st):
+    """TCP 5601: the phone uploads a Pi bundle (bodycam-pi-X.tar.gz from a GitHub release).
+    Text protocol: Pi sends 'BODYCAM-UPDATE 1', 'VERSION v', 'NONCE n'. Phone answers
+    'AUTH <hmac_sha256(ap_password, nonce)>' then 'PUT <size> <sha256> <version>' and the bytes."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", UPDATE_PORT))
+    srv.listen(2)
+    while st.running:
+        conn, addr = srv.accept()
+        threading.Thread(target=handle_update, args=(conn, addr), daemon=True).start()
+
+
+def handle_update(conn, addr):
+    conn.settimeout(30)
+    f = conn.makefile("rwb")
+
+    def say(line):
+        f.write((line + "\n").encode())
+        f.flush()
+
+    try:
+        version = open("/opt/bodycam/VERSION").read().strip()
+    except OSError:
+        version = "?"
+    nonce = secrets.token_hex(16)
+    try:
+        say("BODYCAM-UPDATE 1")
+        say(f"VERSION {version}")
+        say(f"NONCE {nonce}")
+        line = f.readline().decode(errors="replace").strip()
+        if not line.startswith("AUTH "):
+            return  # version query only
+        expect = hmac.new(fan.ap_password().encode(), nonce.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expect, line[5:].strip().lower()):
+            log.warning("update upload from %s: login denied", addr[0])
+            return say("DENIED")
+        say("OK")
+        cmd = f.readline().decode(errors="replace").split()
+        if len(cmd) != 4 or cmd[0] != "PUT" or not cmd[1].isdigit() or int(cmd[1]) > UPDATE_MAX:
+            return say("ERROR bad PUT")
+        size, sha, new_version = int(cmd[1]), cmd[2].lower(), cmd[3]
+        work = tempfile.mkdtemp(prefix="bodycam-update-")
+        path = os.path.join(work, "bundle.tar.gz")
+        h = hashlib.sha256()
+        got = 0
+        with open(path, "wb") as out:
+            while got < size:
+                chunk = f.read(min(65536, size - got))
+                if not chunk:
+                    break
+                out.write(chunk)
+                h.update(chunk)
+                got += len(chunk)
+        if got != size or h.hexdigest() != sha:
+            return say("ERROR checksum")
+        with tarfile.open(path) as t:
+            t.extractall(work, filter="data")  # refuses absolute paths, .., devices
+        bundle = os.path.join(work, "pi")
+        if not os.path.isfile(os.path.join(bundle, "update.sh")):
+            return say("ERROR not a BodyCam Pi bundle")
+        log.info("update %s -> %s received from %s, installing", version, new_version, addr[0])
+        say("INSTALLING")
+        # Separate unit: the installer restarts this service, so it must not be our child.
+        subprocess.Popen(["systemd-run", "--collect", f"--unit=bodycam-update-{int(time.time())}",
+                          "/bin/bash", os.path.join(bundle, "update.sh"), bundle])
+    except Exception as e:
+        log.warning("update from %s failed: %s", addr[0], e)
+        try:
+            say(f"ERROR {e}")
+        except Exception:
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- AI
 def load_hailo(path):
     try:
@@ -656,6 +745,7 @@ def main():
     signal.signal(signal.SIGINT, stop)
 
     threading.Thread(target=startup_signal, daemon=True).start()
+    threading.Thread(target=update_server, args=(st,), daemon=True).start()
     threads = [threading.Thread(target=net_loop, args=(st,), daemon=True),
                threading.Thread(target=encoder_loop, args=(st,), daemon=True),
                threading.Thread(target=watchdog_loop, args=(st,), daemon=True)]

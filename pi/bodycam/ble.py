@@ -78,7 +78,7 @@ def secret():
                 return s
     except OSError:
         pass
-    return nm("-s", "-g", "802-11-wireless-security.psk", "connection", "show", AP_CONNECTION)
+    return fan.ap_password()
 
 
 def status():

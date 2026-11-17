@@ -45,53 +45,11 @@ if ! COPYFILE_DISABLE=1 tar -C "$DIR" --exclude='__pycache__' --exclude='.DS_Sto
   die "copy failed"
 fi
 
-step "install on the Pi and restart services (every command is shown with +)"
-ssh "${SSH_OPTS[@]}" "admin@$HOST" 'bash -s' <<'REMOTE'
-set -eo pipefail
-PS4='    + '
-trap 'echo "    !!! remote command failed (exit $?) at line $LINENO: $BASH_COMMAND"' ERR
-set -x
-sudo install -d /opt/bodycam
-sudo install -m 755 ~/pi/bodycam/server.py ~/pi/bodycam/ble.py ~/pi/bodycam/fan.py /opt/bodycam/
-sudo rm -rf /opt/bodycam/vendor
-sudo cp -r ~/pi/bodycam/vendor /opt/bodycam/vendor
-sudo install -m 644 ~/pi/bodycam.service ~/pi/bodycam-ble.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl unmask bluetooth || true
-sudo systemctl enable --now bluetooth
-sudo systemctl enable bodycam bodycam-ble
-sudo timeout 30 systemctl restart bodycam
-sudo timeout 30 systemctl restart bodycam-ble
-{ set +x; } 2>/dev/null
-
-echo "    -- quiet fan curve"
-CFG=/boot/firmware/config.txt
-NEW=$(mktemp)
-grep -v -e "fan_temp" -e "BODYCAM quiet fan" -e "^# Off below 65C" "$CFG" > "$NEW" || true
-cat ~/pi/fan-quiet.conf >> "$NEW"
-if cmp -s "$NEW" "$CFG"; then
-  echo "    fan curve already applied, no reboot needed"
-  rm -f "$NEW"
-else
-  echo "    fan curve changed in $CFG:"
-  diff "$CFG" "$NEW" | sed 's/^/      /' || true
-  sudo cp "$NEW" "$CFG"; rm -f "$NEW"
-fi
-# config.txt only takes effect at boot; also set the live thresholds now so no reboot is needed.
-TZ=/sys/class/thermal/thermal_zone0
-set -- 65000 72000 78000 82000
-for i in 1 2 3 4; do
-  eval want=\${$i}
-  echo "$want" | sudo tee $TZ/trip_point_${i}_temp >/dev/null 2>&1 || true
-done
-LIVE=$(for i in 1 2 3 4; do printf "%s " $(( $(cat $TZ/trip_point_${i}_temp) / 1000 )); done)
-echo "    fan thresholds now (C): $LIVE  (want: 65 72 78 82)"
-if [ "$LIVE" != "65 72 78 82 " ]; then
-  echo "    live thresholds not writable on this kernel: a reboot will apply config.txt"
-  touch /tmp/bodycam-needs-reboot
-fi
-REMOTE
-[ $? -eq 0 ] || die "install on the Pi failed (see the !!! line above)"
+step "install on the Pi (pi/update.sh, every command shown with +, rolls back if the new code fails)"
+ssh "${SSH_OPTS[@]}" "admin@$HOST" 'sudo bash ~/pi/update.sh ~/pi'
+RC=$?
+[ $RC -eq 2 ] && die "new code did not start; the Pi rolled back to the previous version (log above)"
+[ $RC -eq 0 ] || die "install on the Pi failed (see the !!! lines above)"
 
 step "wait for services to come up"
 sleep 5
