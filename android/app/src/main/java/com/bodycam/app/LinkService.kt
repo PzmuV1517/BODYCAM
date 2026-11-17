@@ -136,6 +136,22 @@ class LinkService : Service() {
         ovrWishReset = Runnable { client?.wantOverride = 255 }.also { main.postDelayed(it, 3000) }
     }
 
+    val piAfContinuous: Boolean? get() = piStatus?.afContinuous
+    val piColorMode: Int? get() = piStatus?.colorMode
+    private val wishResets = HashMap<String, Runnable>()
+
+    /** Send a Pi-side wish for 3 s (every HELLO), then go back to "leave it". */
+    private fun wish(key: String, set: (StreamClient) -> Unit, clear: (StreamClient) -> Unit) {
+        val c = client ?: return
+        set(c)
+        wishResets.remove(key)?.let { main.removeCallbacks(it) }
+        wishResets[key] = Runnable { client?.let(clear) }.also { main.postDelayed(it, 3000) }
+    }
+
+    fun setAfContinuous(on: Boolean) = wish("af", { it.wantAf = if (on) 1 else 0 }, { it.wantAf = 255 })
+    fun setColorMode(mode: Int) = wish("color", { it.wantColor = mode }, { it.wantColor = 255 })
+    fun refocus() { client?.refocus() }
+
     fun setNightExposure(on: Boolean) {
         val c = client ?: return
         c.wantNight = if (on) 1 else 0

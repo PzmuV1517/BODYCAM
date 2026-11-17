@@ -57,8 +57,9 @@ stream with an immediate keyframe. If no `HELLO` for 2 s, the Pi stops sending (
 
 | type | layout | meaning |
 |---|---|---|
-| `0x10` HELLO | `u8 type, u32 seq, u8 want_ai, u8 want_fan_signal, u8 want_night_exposure, u8 want_fan_override` | heartbeat; `want_*` 0=off 1=on 255=no change. Applied when a viewer's wish changes, so a lost toggle self-heals |
+| `0x10` HELLO | `u8 type, u32 seq, u8 want_ai, u8 want_fan_signal, u8 want_night_exposure, u8 want_fan_override, u8 want_af_continuous, u8 want_color_mode` | heartbeat; `want_*` 0=off 1=on 255=no change. Applied when a viewer's wish changes, so a lost toggle self-heals |
 | `0x11` KEYFRAME_REQ | `u8 type` | phone lost a chunk; Pi sends IDR (max 4/s) |
+| `0x15` CAM_CMD | `u8 type, u8 cmd` | 1 = refocus now (full AF sweep). Sent 3x, Pi acts at most 1/s |
 | `0x14` SNAP_REQ | `u8 type, u32 req_id` | ask for a JPEG of the last detector frame that had people in it (resent until answered) |
 | `0x12` SET_WIFI | `u8 type, u32 req_id, u8 ssid_len, ssid, u8 pass_len, pass` | change the Pi AP's SSID/password (only if the `bodycam-ap` profile exists). Resent until acked; applied 1 s after the ack, then the AP restarts |
 
@@ -70,7 +71,7 @@ stream with an immediate keyframe. If no `HELLO` for 2 s, the Pi stops sending (
 | `0x02` DETECT | `u8 type, u32 frame_id, u8 ai_enabled, u8 count, count × (u16 x1, u16 y1, u16 x2, u16 y2, u8 score)` | person boxes, coords 0..65535 of the frame, score 0..255. Sent per inference only while AI is on (`count` may be 0) |
 | `0x05` SNAPSHOT | `u8 type, u32 req_id, u16 chunk_idx, u16 chunk_count, jpeg` | reply to SNAP_REQ, 640x360 JPEG |
 | `0x04` WIFI_ACK | `u8 type, u32 req_id, u8 ok, u8 msg_len, msg` | result of SET_WIFI |
-| `0x03` STATUS | `u8 type, u32 seq, u8 ai_enabled, u8 hailo_ok, u8 enc_fps, u8 infer_fps, u8 cpu_temp_c, u32 pi_now_ms, u8 fan_signal, u8 night_exposure, u8 fan_override_pct, u16 fan_rpm` | reply to every HELLO (`seq` echoed: RTT / link alive). `pi_now_ms` + RTT sync the viewer clock to the Pi |
+| `0x03` STATUS | `u8 type, u32 seq, u8 ai_enabled, u8 hailo_ok, u8 enc_fps, u8 infer_fps, u8 cpu_temp_c, u32 pi_now_ms, u8 fan_signal, u8 night_exposure, u8 fan_override_pct, u16 fan_rpm, u8 af_continuous, u8 color_mode` | reply to every HELLO (`seq` echoed: RTT / link alive). `pi_now_ms` + RTT sync the viewer clock to the Pi |
 
 Vibration alerts are decided on the phone from DETECT packets (so the alert toggle is phone-only).
 
@@ -126,3 +127,10 @@ it to the Pi on TCP 5601: login is HMAC-SHA256 of a nonce with the Wi-Fi passwor
 SHA-256 checked, extracted safely, and `update.sh` installs it in a separate systemd unit. If the
 video service is not running 10 s after the restart, the previous version is restored.
 `tools/deploy-pi.sh` uses the same `update.sh`. Version in `pi/VERSION` (`/opt/bodycam/VERSION`).
+
+## Focus and color
+
+`af_continuous` (default on): continuous autofocus; off = focus held where the last refocus put it.
+AF range is Normal (no macro) so it does not lock onto things touching the lens.
+`color_mode`: 0 AUTO, 1 DAY (fixed daylight white balance), 2 INDOOR, 3 B&W (saturation 0). The NoIR
+camera sees infrared, which turns daylight scenes pink/purple under auto white balance.

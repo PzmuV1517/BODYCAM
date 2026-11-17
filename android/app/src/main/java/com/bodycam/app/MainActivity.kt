@@ -44,6 +44,7 @@ class MainActivity : Activity(), LinkService.Listener {
     private lateinit var vibButton: TextView
     private lateinit var nightButton: TextView
     private lateinit var menuButton: TextView
+    private lateinit var focusButton: TextView
     private lateinit var menu: GloveMenu
     private var night = false
     private var videoOffset = 0f // 0 = left edge, 1 = right edge
@@ -172,10 +173,11 @@ class MainActivity : Activity(), LinkService.Listener {
         vibButton = button { service?.let { it.alertsEnabled = !it.alertsEnabled; refresh() } }
         nightButton = button { toggleNight() }
         menuButton = button { menu.open() }
+        focusButton = button { service?.refocus() } // one full autofocus sweep on the Pi
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(6), dp(6), dp(10), dp(6))
-            listOf(detButton, vibButton, nightButton, menuButton).forEach {
+            listOf(detButton, vibButton, focusButton, nightButton, menuButton).forEach {
                 addView(it, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(4); bottomMargin = dp(4) })
             }
         }
@@ -204,6 +206,7 @@ class MainActivity : Activity(), LinkService.Listener {
         style(vibButton, if (s?.alertsEnabled != false) "VIB ON" else "VIB OFF", s?.alertsEnabled != false)
         style(nightButton, if (night) "NIGHT ON" else "NIGHT", night)
         style(menuButton, "MENU", false)
+        style(focusButton, "FOCUS", false)
         demoView.visibility = if (s?.demo == true) View.VISIBLE else View.GONE
         val rot = if (s?.videoFlip == true) 180f else 0f // boxes and demo follow the video
         overlay.rotation = rot

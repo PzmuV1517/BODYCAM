@@ -20,6 +20,9 @@ object Proto {
     const val STATUS_EXT = 15  // + u32 pi_now_ms, u8 fan_indicator
     const val STATUS_EXT2 = 16 // + u8 night_exposure
     const val STATUS_EXT3 = 19 // + u8 fan_override_pct (0 = auto), u16 fan_rpm
+    const val STATUS_EXT4 = 21 // + u8 af_continuous, u8 color_mode
+    const val CAM_CMD = 0x15   // u8 type, u8 cmd: 1 = refocus
+    val COLOR_MODES = listOf("AUTO", "DAY", "INDOOR", "B&W")
 
     fun u8(b: ByteArray, o: Int) = b[o].toInt() and 0xFF
     fun u16(b: ByteArray, o: Int) = (u8(b, o) shl 8) or u8(b, o + 1)
@@ -37,13 +40,15 @@ object Proto {
     }
 
     /** wantFan: 0/1 = set the Pi's fan startup signal, 255 = leave it. */
-    fun hello(seq: Int, wantAi: Boolean, wantFan: Int, wantNight: Int, wantOverride: Int) = byteArrayOf(
+    fun hello(seq: Int, wantAi: Boolean, wantFan: Int, wantNight: Int, wantOverride: Int, wantAf: Int, wantColor: Int) = byteArrayOf(
         HELLO.toByte(),
         (seq ushr 24).toByte(), (seq ushr 16).toByte(), (seq ushr 8).toByte(), seq.toByte(),
         if (wantAi) 1 else 0,
         wantFan.toByte(),
         wantNight.toByte(),
         wantOverride.toByte(),
+        wantAf.toByte(),
+        wantColor.toByte(),
     )
 
     /** Signed difference a - b of two u32 millisecond clocks (handles wrap-around). */
@@ -66,4 +71,6 @@ data class PiStatus(
     val nightExposure: Boolean? = null,
     val fanOverride: Int? = null, // 0 = automatic, 1..100 %
     val fanRpm: Int? = null,
+    val afContinuous: Boolean? = null,
+    val colorMode: Int? = null,
 )

@@ -61,11 +61,15 @@ VIDEO_HDR = struct.Struct("!BIHHBI")    # type, frame_id, chunk_idx, chunk_count
 DETECT_HDR = struct.Struct("!BIBB")     # type, frame_id, ai_enabled, count
 BOX = struct.Struct("!HHHHB")           # x1, y1, x2, y2 (0..65535 of frame), score (0..255)
 # type, echoed seq, ai_enabled, hailo_ok, enc_fps, infer_fps, cpu_temp_c, pi_now_ms, fan_indicator
-STATUS = struct.Struct("!BIBBBBBIBBBH")  # ..., fan_indicator, night_exposure, fan_override_pct, fan_rpm
+# ..., fan_indicator, night_exposure, fan_override_pct, fan_rpm, af_continuous, color_mode
+STATUS = struct.Struct("!BIBBBBBIBBBHBB")
 HELLO = struct.Struct("!BIB")           # type, seq, want_ai (0=off, 1=on, 255=don't care)
 HELLO_FAN = struct.Struct("!BIBB")      # + want_fan_indicator (0/1/255), newer clients
 HELLO_NIGHT = struct.Struct("!BIBBB")   # + want_night_exposure (0/1/255)
 HELLO_OVR = struct.Struct("!BIBBBB")    # + want_fan_override (0 = auto, 1..100 %, 255 = leave)
+HELLO_CAM = struct.Struct("!BIBBBBBB")  # + want_af_continuous (0/1/255), want_color_mode (0..3/255)
+PKT_CAM_CMD = 0x15    # u8 type, u8 cmd (1 = refocus now)
+COLOR_MODES = ("AUTO", "DAY", "INDOOR", "B&W")
 FAN_OVERRIDE_MAX_C = 80                 # safety: override cancelled at this temperature
 
 
@@ -165,6 +169,10 @@ class State:
         self.fan_indicator = fan.indicator_enabled()
         self.night_exposure = bool(fan.load_settings().get("night_exposure", False))
         self.cam = None
+        settings = fan.load_settings()
+        self.af_continuous = bool(settings.get("af_continuous", True))
+        self.color_mode = int(settings.get("color_mode", 0)) % len(COLOR_MODES)
+        self.last_refocus = 0.0
         self.snap_rgb = None    # last detector frame that contained people (RGB, 640x360)
         self.snap_lock = threading.Lock()
         self.snap_sent = {}     # (addr, req_id) -> time, so retries of one request are answered once
@@ -206,6 +214,8 @@ def net_loop(st):
     last_fan = {}
     last_night = {}
     last_ovr = {}
+    last_af = {}
+    last_color = {}
     while st.running:
         r, _, _ = select.select([sock], [], [], 0.5)
         if not r:
@@ -225,12 +235,54 @@ def net_loop(st):
                 last_fan.pop(addr, None)
                 last_night.pop(addr, None)
                 last_ovr.pop(addr, None)
+                last_af.pop(addr, None)
+                last_color.pop(addr, None)
+            # camera settings wished by this viewer (255 = leave; applied when the wish changes)
+            if len(data) >= HELLO_CAM.size:
+                for key, val, last in (("af_continuous", data[9], last_af), ("color_mode", data[10], last_color)):
+                    if val == 255:
+                        last.pop(addr, None)
+                        continue
+                    if last.get(addr) == val:
+                        continue
+                    last[addr] = val
+                    if key == "af_continuous" and val in (0, 1) and bool(val) != st.af_continuous:
+                        st.af_continuous = bool(val)
+                        fan.save_setting(key, st.af_continuous)
+                        apply_focus_mode(st)
+                        log.info("autofocus %s (by %s)", "continuous" if val else "hold", addr[0])
+                    elif key == "color_mode" and val < len(COLOR_MODES) and val != st.color_mode:
+                        st.color_mode = val
+                        fan.save_setting(key, val)
+                        apply_color(st)
+                        log.info("color %s (by %s)", COLOR_MODES[val], addr[0])
             want_night = data[7] if len(data) >= HELLO_NIGHT.size else 255
             if want_night == 255:
                 last_night.pop(addr, None)
             want_ovr = data[8] if len(data) >= HELLO_OVR.size else 255
             if want_ovr == 255:
                 last_ovr.pop(addr, None)
+                last_af.pop(addr, None)
+                last_color.pop(addr, None)
+            # camera settings wished by this viewer (255 = leave; applied when the wish changes)
+            if len(data) >= HELLO_CAM.size:
+                for key, val, last in (("af_continuous", data[9], last_af), ("color_mode", data[10], last_color)):
+                    if val == 255:
+                        last.pop(addr, None)
+                        continue
+                    if last.get(addr) == val:
+                        continue
+                    last[addr] = val
+                    if key == "af_continuous" and val in (0, 1) and bool(val) != st.af_continuous:
+                        st.af_continuous = bool(val)
+                        fan.save_setting(key, st.af_continuous)
+                        apply_focus_mode(st)
+                        log.info("autofocus %s (by %s)", "continuous" if val else "hold", addr[0])
+                    elif key == "color_mode" and val < len(COLOR_MODES) and val != st.color_mode:
+                        st.color_mode = val
+                        fan.save_setting(key, val)
+                        apply_color(st)
+                        log.info("color %s (by %s)", COLOR_MODES[val], addr[0])
             elif want_ovr <= 100 and last_ovr.get(addr) != want_ovr:
                 last_ovr[addr] = want_ovr
                 if want_ovr > 0 and cpu_temp() >= FAN_OVERRIDE_MAX_C:
@@ -266,9 +318,14 @@ def net_loop(st):
             st.link.send(STATUS.pack(PKT_STATUS, seq, st.ai_enabled, st.hailo_ok,
                                      min(st.enc_fps, 255), min(st.infer_fps, 255), cpu_temp(),
                                      now_ms(), st.fan_indicator, st.night_exposure,
-                                     fan.get_override(), min(fan.rpm(), 65535)), addr)
+                                     fan.get_override(), min(fan.rpm(), 65535),
+                                     st.af_continuous, st.color_mode), addr)
         elif kind == PKT_SET_WIFI:
             handle_set_wifi(st, data, addr)
+        elif kind == PKT_CAM_CMD and len(data) >= 2:
+            if data[1] == 1 and time.monotonic() - st.last_refocus > 1.0:  # phone sends it 3x
+                st.last_refocus = time.monotonic()
+                refocus(st)
         elif kind == PKT_SNAP_REQ and len(data) >= 5:
             req_id = struct.unpack_from("!I", data, 1)[0]
             key = (addr, req_id)
@@ -647,16 +704,61 @@ def apply_exposure(st):
             log.exception("could not change exposure limits")
 
 
-def open_camera(a, lores_size, night=False):
+def _lc():
+    from libcamera import controls as lc
+    return lc
+
+
+def cam_set(st, controls):
+    if st.cam is None:
+        return
+    try:
+        st.cam.set_controls(controls)
+    except Exception as e:
+        log.warning("camera control %s failed: %s", list(controls), e)
+
+
+def focus_controls(continuous):
+    lc = _lc()
+    # Normal range: excludes extreme close-up, so focus does not get stuck on things touching the lens.
+    return {"AfMode": lc.AfModeEnum.Continuous if continuous else lc.AfModeEnum.Auto,
+            "AfRange": lc.AfRangeEnum.Normal, "AfSpeed": lc.AfSpeedEnum.Fast}
+
+
+def apply_focus_mode(st):
+    cam_set(st, focus_controls(st.af_continuous))
+
+
+def refocus(st):
+    """Fresh full autofocus sweep now. In hold mode the result is then kept; in continuous mode
+    the camera goes back to continuous AF after the sweep."""
+    lc = _lc()
+    log.info("refocus")
+    cam_set(st, {"AfMode": lc.AfModeEnum.Auto, "AfTrigger": lc.AfTriggerEnum.Start})
+    if st.af_continuous:
+        threading.Timer(1.5, lambda: cam_set(st, {"AfMode": lc.AfModeEnum.Continuous})).start()
+
+
+def color_controls(mode):
+    """NoIR camera: daylight IR makes auto white balance drift pink; fixed modes or B&W fix that."""
+    lc = _lc()
+    awb = {0: lc.AwbModeEnum.Auto, 1: lc.AwbModeEnum.Daylight, 2: lc.AwbModeEnum.Indoor, 3: lc.AwbModeEnum.Auto}[mode]
+    return {"AwbEnable": True, "AwbMode": awb, "Saturation": 0.0 if mode == 3 else 1.0}
+
+
+def apply_color(st):
+    cam_set(st, color_controls(st.color_mode))
+
+
+def open_camera(a, lores_size, night=False, af_continuous=True, color_mode=0):
     from picamera2 import Picamera2
 
     cam = Picamera2()
     frame_us = int(1_000_000 / a.fps)
     controls = {"FrameDurationLimits": frame_limits(a, night)}
     try:
-        from libcamera import controls as lc
-        controls["AfMode"] = lc.AfModeEnum.Continuous
-        controls["AfSpeed"] = lc.AfSpeedEnum.Fast
+        controls.update(focus_controls(af_continuous))
+        controls.update(color_controls(color_mode))
     except Exception:
         pass
     kwargs = dict(
@@ -724,7 +826,7 @@ def main():
         _, model_w, _ = hailo.get_input_shape()
         lores_size = (model_w, (model_w * a.height // a.width) // 2 * 2)  # same aspect, letterboxed later
 
-    cam = open_camera(a, lores_size, st.night_exposure)
+    cam = open_camera(a, lores_size, st.night_exposure, st.af_continuous, st.color_mode)
     st.cam = cam
 
     def stop(*_):

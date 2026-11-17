@@ -93,6 +93,21 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
                 },
             ),
             "PI" to listOf(
+                Spec("REFOCUS", "Forces a fresh full autofocus sweep now (about 1 s). Use when the picture stays blurry after something was close to the camera. Also on the main screen as FOCUS.",
+                    { if (svc?.piAfContinuous != null) "RUN" else "NO LINK" },
+                    { if (svc?.piAfContinuous != null) State.NEUTRAL else State.DISABLED }) {
+                    svc?.refocus()
+                },
+                Spec("AF CONT", "ON: the camera refocuses by itself all the time. OFF: focus stays where the last REFOCUS put it, so it cannot wander onto branches or your own kit. Stored on the Pi.",
+                    { svc?.piAfContinuous?.let { onOff(it) } ?: "NO LINK" },
+                    { svc?.piAfContinuous?.let { st(it) } ?: State.DISABLED }) {
+                    svc?.piAfContinuous?.let { svc?.setAfContinuous(!it) }
+                },
+                Spec("COLOR", "Tap to cycle. AUTO: automatic white balance. DAY: fixed sunlight balance, most natural outdoors with this infrared (NoIR) camera. INDOOR: fixed artificial light. B&W: black and white, removes the pink infrared cast completely. Stored on the Pi.",
+                    { svc?.piColorMode?.let { Proto.COLOR_MODES.getOrElse(it) { "?" } } ?: "NO LINK" },
+                    { if (svc?.piColorMode != null) State.NEUTRAL else State.DISABLED }) {
+                    svc?.piColorMode?.let { svc?.setColorMode((it + 1) % Proto.COLOR_MODES.size) }
+                },
                 Spec("NIGHT EXP", "Low light: the camera may lengthen exposure up to 1/15 s when the scene is dark. Brighter image, frame rate drops toward 15 FPS and delay rises about 30 MS only while dark. Stored on the Pi.",
                     { svc?.piNightExposure?.let { onOff(it) } ?: "NO LINK" },
                     { svc?.piNightExposure?.let { st(it) } ?: State.DISABLED }) {
@@ -269,7 +284,7 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
         grid.removeAllViews()
         tiles.clear()
         val specs = pages[i].second
-        for (r in 0 until 2) {
+        for (r in 0 until 3) {
             val row = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
             for (c in 0 until 3) {
                 val spec = specs.getOrNull(r * 3 + c)
@@ -278,7 +293,7 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
                     if (c < 2) marginEnd = dp(10)
                 })
             }
-            grid.addView(row, LinearLayout.LayoutParams(-1, 0, 1f).apply { if (r == 0) bottomMargin = dp(10) })
+            grid.addView(row, LinearLayout.LayoutParams(-1, 0, 1f).apply { if (r < 2) bottomMargin = dp(8) })
         }
         refresh()
     }
@@ -352,11 +367,11 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
                 nameP.textSize = 18 * d
                 c.drawText(spec.name, width / 2f, height / 2f + nameP.textSize / 3, nameP)
             } else {
-                nameP.textSize = 17 * d
-                valueP.textSize = 26 * d
+                nameP.textSize = 16 * d
+                valueP.textSize = 22 * d
                 val value = spec.value()
-                c.drawText(spec.name, width / 2f, height * 0.38f, nameP)
-                c.drawText(fit(value, valueP, width - 16 * d), width / 2f, height * 0.38f + valueP.textSize * 1.3f, valueP)
+                c.drawText(spec.name, width / 2f, height * 0.42f, nameP)
+                c.drawText(fit(value, valueP, width - 16 * d), width / 2f, height * 0.42f + valueP.textSize * 1.25f, valueP)
             }
         }
 

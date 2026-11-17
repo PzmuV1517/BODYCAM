@@ -99,6 +99,8 @@ def status():
             f"service={svc}\ntemp_c={temp}\nfan_rpm={fan_rpm}\nfan_indicator={'on' if fan.indicator_enabled() else 'off'}\n"
             f"night_exposure={'on' if fan.load_settings().get('night_exposure') else 'off'}\n"
             f"fan_override={fan.get_override() or 'auto'}\n"
+            f"af_continuous={'on' if fan.load_settings().get('af_continuous', True) else 'off'}\n"
+            f"color_mode={('AUTO', 'DAY', 'INDOOR', 'B&W')[int(fan.load_settings().get('color_mode', 0)) % 4]}\n"
             f"uptime={up}\nip={ips}\n")
 
 
