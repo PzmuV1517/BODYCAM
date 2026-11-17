@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish a new BodyCam version as a GitHub release: phone app APK + Pi software bundle.
+# Publish a new BodyCam version as a GitHub release: phone app APK + Pi software bundle + Mac app.
 # Phones update themselves (MENU > APP > UPDATE) and the Pi (MENU > PI > PI FW).
 # Usage: tools/release-app.sh 1.1 ["release notes"]
 # Builds on THIS Mac: releases must be signed with the same key as the installed app
@@ -47,14 +47,20 @@ COPYFILE_DISABLE=1 tar -C "$DIR" --exclude='__pycache__' --exclude='.DS_Store' -
 echo "    $PIB ($(du -h "$PIB" | cut -f1), $(tar -tzf "$PIB" | wc -l | tr -d ' ') entries)"
 echo "    sha256 $(shasum -a 256 "$PIB" | cut -d' ' -f1)"
 
+step "build Mac app"
+(cd "$DIR/mac" && ./build.sh) || die "Mac build failed"
+MACZ="$DIR/android/app/build/outputs/apk/release/BodyCam-mac-$VERSION.zip"
+ditto -c -k --keepParent "$DIR/mac/build/BodyCam.app" "$MACZ" || die "could not zip the Mac app"
+echo "    $MACZ ($(du -h "$MACZ" | cut -f1))"
+
 step "commit version bump and push"
 git -C "$DIR" add "$GRADLE" "$DIR/pi/VERSION"
 git -C "$DIR" commit -q -m "Release app v$VERSION" || die "commit failed"
 git -C "$DIR" push -q origin HEAD || die "push failed"
 echo "    pushed $(git -C "$DIR" rev-parse --short HEAD)"
 
-step "create GitHub release v$VERSION with the APK and the Pi bundle"
-gh release create "v$VERSION" "$APK" "$PIB" --repo PzmuV1517/BODYCAM --target "$(git -C "$DIR" rev-parse HEAD)" \
+step "create GitHub release v$VERSION (phone APK, Pi bundle, Mac app)"
+gh release create "v$VERSION" "$APK" "$PIB" "$MACZ" --repo PzmuV1517/BODYCAM --target "$(git -C "$DIR" rev-parse HEAD)" \
   --title "BodyCam v$VERSION" --notes "$NOTES" || die "release creation failed"
 
 echo
