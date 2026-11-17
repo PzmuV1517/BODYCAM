@@ -53,6 +53,7 @@ class MainActivity : Activity(), LinkService.Listener {
             val s = (binder as LinkService.LocalBinder).service
             service = s
             s.listener = this@MainActivity
+            s.uiVisible = true
             surfaceHolder?.let { s.setSurface(it.surface) }
             refresh()
         }
@@ -70,12 +71,23 @@ class MainActivity : Activity(), LinkService.Listener {
         buildUi()
         hideSystemBars()
         if (android.os.Build.VERSION.SDK_INT >= 31) { // Bluetooth Wi-Fi recovery
-            val perms = arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT)
+            val perms = arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT) +
+                (if (android.os.Build.VERSION.SDK_INT >= 33) arrayOf(android.Manifest.permission.POST_NOTIFICATIONS) else emptyArray())
             if (perms.any { checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }) requestPermissions(perms, 1)
         }
         val intent = Intent(this, LinkService::class.java)
         startForegroundService(intent)
         bindService(intent, conn, Context.BIND_AUTO_CREATE)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        service?.uiVisible = true
+    }
+
+    override fun onStop() {
+        service?.uiVisible = false
+        super.onStop()
     }
 
     override fun onDestroy() {

@@ -51,6 +51,21 @@ class StreamClient(
         wifiReq = WifiReq(id, Proto.setWifi(id, ssid, pass), SystemClock.elapsedRealtime() + 4000, done)
     }
 
+    // pending contact snapshot (JPEG from the Pi), resent until complete or timed out
+    private class SnapReq(val id: Int, val deadline: Long, val done: (ByteArray?) -> Unit) {
+        var parts: Array<ByteArray?>? = null
+        var got = 0
+    }
+    private val snapLock = Any()
+    private var snapReq: SnapReq? = null
+
+    /** Ask the Pi for a JPEG of the last frame with people in it. [done] gets null after 3 s. */
+    fun requestSnapshot(done: (ByteArray?) -> Unit) {
+        val id = (SystemClock.elapsedRealtime() and 0x7FFFFFFF).toInt()
+        val old = synchronized(snapLock) { snapReq.also { snapReq = SnapReq(id, SystemClock.elapsedRealtime() + 3000, done) } }
+        old?.done?.invoke(null)
+    }
+
     private val socket = DatagramSocket()
     private val sentAt = LongArray(64)
 
@@ -102,6 +117,14 @@ class StreamClient(
                         socket.send(DatagramPacket(r.packet, r.packet.size, addr, port))
                     }
                 }
+                val expired = synchronized(snapLock) {
+                    snapReq?.let { r -> if (now > r.deadline) { snapReq = null; r } else null }
+                }
+                expired?.done?.invoke(null)
+                synchronized(snapLock) { snapReq?.id }?.let { id ->
+                    val p = byteArrayOf(Proto.SNAP_REQ.toByte(), (id ushr 24).toByte(), (id ushr 16).toByte(), (id ushr 8).toByte(), id.toByte())
+                    socket.send(DatagramPacket(p, p.size, addr, port))
+                }
                 if (needKey && now - lastKeyReq > 300) { // retried until a keyframe shows up
                     lastKeyReq = now
                     socket.send(DatagramPacket(byteArrayOf(Proto.KEYFRAME_REQ.toByte()), 1, addr, port))
@@ -134,6 +157,7 @@ class StreamClient(
                     Proto.DETECT -> if (n >= Proto.DETECT_HDR) onDetect(buf, n)
                     Proto.STATUS -> if (n >= Proto.STATUS_SIZE) onStatus(buf, n)
                     Proto.WIFI_ACK -> if (n >= 7) onWifiAck(buf, n)
+                    Proto.SNAPSHOT -> if (n > 9) onSnapshot(buf, n)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "bad packet", e)
@@ -195,6 +219,27 @@ class StreamClient(
             o += Proto.BOX_SIZE
         }
         cb.onDetections(boxes)
+    }
+
+    private fun onSnapshot(b: ByteArray, n: Int) {
+        val id = Proto.u32(b, 1).toInt()
+        val idx = Proto.u16(b, 5)
+        val count = Proto.u16(b, 7)
+        val finished = synchronized(snapLock) {
+            val r = snapReq ?: return
+            if (r.id != id || count == 0 || idx >= count) return
+            val parts = r.parts ?: arrayOfNulls<ByteArray>(count).also { r.parts = it }
+            if (parts.size != count || parts[idx] != null) return
+            parts[idx] = b.copyOfRange(9, n)
+            r.got++
+            if (r.got < count) return
+            snapReq = null
+            r
+        }
+        val parts = finished.parts!!
+        val out = java.io.ByteArrayOutputStream()
+        parts.forEach { out.write(it!!) }
+        finished.done(out.toByteArray())
     }
 
     private fun onWifiAck(b: ByteArray, n: Int) {

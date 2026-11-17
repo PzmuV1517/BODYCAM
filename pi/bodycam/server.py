@@ -45,6 +45,9 @@ PKT_DETECT = 0x02
 PKT_STATUS = 0x03
 PKT_HELLO = 0x10
 PKT_KEYFRAME_REQ = 0x11
+PKT_SNAP_REQ = 0x14   # u8 type, u32 req_id: send a JPEG of the last frame with people in it
+PKT_SNAPSHOT = 0x05   # u8 type, u32 req_id, u16 chunk_idx, u16 chunk_count, JPEG bytes
+SNAP_HDR = struct.Struct("!BIHH")
 PKT_SET_WIFI = 0x12   # u8 type, u32 req_id, u8 ssid_len, ssid, u8 pass_len, pass
 PKT_WIFI_ACK = 0x04   # u8 type, u32 req_id, u8 ok, u8 msg_len, msg
 AP_CONNECTION = "bodycam-ap"  # NetworkManager profile created by setup-ap.sh
@@ -157,6 +160,9 @@ class State:
         self.fan_indicator = fan.indicator_enabled()
         self.night_exposure = bool(fan.load_settings().get("night_exposure", False))
         self.cam = None
+        self.snap_rgb = None    # last detector frame that contained people (RGB, 640x360)
+        self.snap_lock = threading.Lock()
+        self.snap_sent = {}     # (addr, req_id) -> time, so retries of one request are answered once
         self.force_idr = threading.Event()
         self.last_idr = 0.0
         self.last_frame = time.monotonic()
@@ -258,6 +264,14 @@ def net_loop(st):
                                      fan.get_override(), min(fan.rpm(), 65535)), addr)
         elif kind == PKT_SET_WIFI:
             handle_set_wifi(st, data, addr)
+        elif kind == PKT_SNAP_REQ and len(data) >= 5:
+            req_id = struct.unpack_from("!I", data, 1)[0]
+            key = (addr, req_id)
+            now = time.monotonic()
+            if now - st.snap_sent.get(key, 0) > 1.0:  # phone resends until it has it; re-send at most 1/s
+                st.snap_sent = {k: t for k, t in st.snap_sent.items() if now - t < 10}
+                st.snap_sent[key] = now
+                threading.Thread(target=send_snapshot, args=(st, addr, req_id), daemon=True).start()
         elif kind == PKT_KEYFRAME_REQ:
             # Rate-limited so a lossy link can't turn the stream into all-IDR.
             if time.monotonic() - st.last_idr > 0.25:
@@ -412,6 +426,37 @@ def encoder_loop(st):
             st.enc_fps, frames, t0 = round(frames / (now - t0)), 0, now
 
 
+def encode_jpeg(rgb, quality=75):
+    try:
+        import simplejpeg
+        return simplejpeg.encode_jpeg(np.ascontiguousarray(rgb[:, :, :3]), quality=quality, colorspace="RGB")
+    except ImportError:
+        h, w = rgb.shape[:2]
+        ctx = av.CodecContext.create("mjpeg", "w")
+        ctx.width, ctx.height, ctx.pix_fmt = w, h, "yuvj420p"
+        ctx.time_base = Fraction(1, 30)
+        frame = av.VideoFrame.from_ndarray(np.ascontiguousarray(rgb[:, :, :3]), format="rgb24").reformat(format="yuvj420p")
+        return b"".join(bytes(p) for p in ctx.encode(frame)) + b"".join(bytes(p) for p in ctx.encode(None))
+
+
+def send_snapshot(st, addr, req_id):
+    with st.snap_lock:
+        rgb = st.snap_rgb
+    if rgb is None:
+        return
+    try:
+        jpg = encode_jpeg(rgb)
+    except Exception:
+        log.exception("snapshot encode failed")
+        return
+    count = (len(jpg) + MAX_PAYLOAD - 1) // MAX_PAYLOAD
+    for i in range(count):
+        st.link.send(SNAP_HDR.pack(PKT_SNAPSHOT, req_id, i, count) + jpg[i * MAX_PAYLOAD:(i + 1) * MAX_PAYLOAD], addr)
+        if i % 8 == 7:
+            time.sleep(0.001)
+    log.info("snapshot %d bytes -> %s", len(jpg), addr[0])
+
+
 # ---------------------------------------------------------------- AI
 def load_hailo(path):
     try:
@@ -468,6 +513,9 @@ def inference_loop(st, hailo):
             return
         runs += 1
         boxes = parse_persons(out, top, left, w, h, model_w, model_h, a.threshold)
+        if boxes:
+            with st.snap_lock:
+                st.snap_rgb = rgb  # keep the frame the detection came from, for contact snapshots
         pkt = bytearray(DETECT_HDR.pack(PKT_DETECT, n & 0xFFFFFFFF, 1, len(boxes)))
         for score, x0, y0, x1, y1 in boxes:
             pkt += BOX.pack(int(x0 * 65535), int(y0 * 65535), int(x1 * 65535), int(y1 * 65535),

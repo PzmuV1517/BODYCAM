@@ -10,6 +10,8 @@ object Proto {
     const val KEYFRAME_REQ = 0x11
     const val SET_WIFI = 0x12
     const val WIFI_ACK = 0x04
+    const val SNAP_REQ = 0x14
+    const val SNAPSHOT = 0x05
 
     const val VIDEO_HDR = 14   // u8 type, u32 frame_id, u16 idx, u16 count, u8 flags, u32 capture_ms
     const val DETECT_HDR = 7   // u8 type, u32 frame_id, u8 ai, u8 count

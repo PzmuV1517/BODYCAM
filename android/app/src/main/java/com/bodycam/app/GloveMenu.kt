@@ -103,10 +103,7 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
                     { svc?.piFanIndicator?.let { st(it) } ?: State.DISABLED }) {
                     svc?.piFanIndicator?.let { svc?.setFanIndicator(!it) }
                 },
-                Spec("BUZZ TEST", "Plays the contact vibration so you can check you feel it through your kit.",
-                    { "RUN" }, { State.NEUTRAL }) {
-                    svc?.testAlert()
-                },
+                null,
                 Spec("FAN -", "Lowers the fixed fan speed by 10%. Reaching 0% ends the override and the fan goes back to the automatic quiet curve.",
                     { "-10%" }, { if (svc?.fanOverride == null) State.DISABLED else State.NEUTRAL }) {
                     svc?.fanOverride?.let { if (it > 0) svc?.setFanOverride(it - 10) }
@@ -120,6 +117,25 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
                     { "+10%" }, { if (svc?.fanOverride == null) State.DISABLED else State.NEUTRAL }) {
                     svc?.fanOverride?.let { svc?.setFanOverride(minOf(100, it + 10)) }
                 },
+            ),
+            "ALERTS" to listOf(
+                Spec("VIB", "Vibration on contact (double buzz, triple when more people appear) and one long buzz when the link is lost in the background.",
+                    { onOff(svc?.alertsEnabled == true) }, { st(svc?.alertsEnabled == true) }) {
+                    svc?.let { it.alertsEnabled = !it.alertsEnabled }; host.refreshMain()
+                },
+                Spec("NOTIFY", "Notification for every contact with a picture of the moment (boxes drawn on it), so the notification centre becomes a contact log. Works with the app in the background.",
+                    { onOff(svc?.notifyEnabled == true) }, { st(svc?.notifyEnabled == true) }) {
+                    svc?.let { it.notifyEnabled = !it.notifyEnabled }
+                },
+                Spec("BUZZ TEST", "Plays the contact vibration so you can check you feel it through your kit.",
+                    { "RUN" }, { State.NEUTRAL }) {
+                    svc?.testAlert()
+                },
+                Spec("NOTIFY TEST", "Posts a contact notification with the latest picture, to check how it looks.",
+                    { "RUN" }, { State.NEUTRAL }) {
+                    svc?.testNotify()
+                },
+                null, null,
             ),
             "LINK" to listOf(
                 Spec("SSID", "Network name of the Pi. Empty = use the Wi-Fi the phone is already on (bench test). Tap to edit.",
@@ -180,9 +196,12 @@ class GloveMenu(private val activity: Activity, private val host: Host) : FrameL
             showInfo(if (infoMode) "INFO ON: TAP A TILE TO SEE WHAT IT DOES" else "")
         }, compact = true, amberWhenOn = true)
         val back = Tile(Spec("BACK", "", { "" }, { State.NEUTRAL }) { close() }, compact = true)
+        // Leave the app; link, detection, vibration and notifications keep running in the background.
+        val hide = Tile(Spec("HIDE APP", "", { "" }, { State.NEUTRAL }) { close(); activity.moveTaskToBack(true) }, compact = true)
         val top = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(title, LinearLayout.LayoutParams(0, -1, 1f))
+            addView(hide, LinearLayout.LayoutParams(dp(170), -1).apply { marginEnd = dp(8) })
             addView(infoTile, LinearLayout.LayoutParams(dp(150), -1).apply { marginEnd = dp(8) })
             addView(back, LinearLayout.LayoutParams(dp(150), -1))
         }

@@ -23,6 +23,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.view.Surface
+import android.view.View
 
 /**
  * Owns everything that must keep running with the screen off or the app in the background:
@@ -176,6 +177,13 @@ class LinkService : Service() {
             prefs.edit().putBoolean(KEY_VIDEO_FLIP, v).apply()
             attachDecoder(if (demo) null else surface) // decoder applies the rotation
         }
+
+    var notifyEnabled: Boolean
+        get() = prefs.getBoolean(KEY_NOTIFY, true)
+        set(v) { prefs.edit().putBoolean(KEY_NOTIFY, v).apply() }
+
+    /** Set by the activity: true while the live view is on screen. */
+    @Volatile var uiVisible = false
 
     var alertsEnabled: Boolean
         get() = prefs.getBoolean(KEY_ALERTS, true)
@@ -335,6 +343,7 @@ class LinkService : Service() {
 
         override fun onDetections(boxes: List<Box>) {
             lastBoxesAt = SystemClock.elapsedRealtime()
+            if (boxes.isNotEmpty()) lastBoxes = boxes
             persons = boxes.size
             main.post { listener?.onBoxes(boxes) }
             handleAlert(boxes.size)
@@ -376,13 +385,129 @@ class LinkService : Service() {
     fun testAlert() = vibrate(double = false)
 
     private fun alert(now: Long, double: Boolean) {
-        if (!alertsEnabled || !aiEnabled) return
+        if (!aiEnabled) return
         lastAlertAt = now
-        vibrate(double)
+        if (alertsEnabled) vibrate(double)
+        if (notifyEnabled) notifyContact(alertedCount, lastBoxes)
     }
 
-    private fun vibrate(double: Boolean) {
-        val timings = if (double) longArrayOf(0, 90, 70, 90, 70, 90) else longArrayOf(0, 120, 80, 120)
+    // ------------------------------------------------------------------ notifications
+    @Volatile private var lastBoxes: List<Box> = emptyList()
+    private var contactSeq = 0
+    private var linkWasUp = false
+    private var linkDownAt = 0L
+    private var lostNotified = false
+
+    /** NOTIFY TEST tile: a contact notification with the current picture. */
+    fun testNotify() = notifyContact(maxOf(1, persons), lastBoxes)
+
+    /** "CONTACT n" with a snapshot of the detection frame (from the Pi) and the boxes drawn on it. */
+    private fun notifyContact(count: Int, boxes: List<Box>) {
+        val at = System.currentTimeMillis()
+        if (demo) {
+            main.post { postContact(count, at, demoPicture(boxes)) }
+            return
+        }
+        val c = client ?: return main.post { postContact(count, at, null) }.let { }
+        c.requestSnapshot { jpg ->
+            val bmp = jpg?.let { decodeWithBoxes(it, boxes) }
+            main.post { postContact(count, at, bmp) }
+        }
+    }
+
+    private fun decodeWithBoxes(jpg: ByteArray, boxes: List<Box>): android.graphics.Bitmap? {
+        val src = android.graphics.BitmapFactory.decodeByteArray(jpg, 0, jpg.size) ?: return null
+        val bmp = src.copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+        drawBoxes(bmp, boxes)
+        return if (videoFlip) {
+            val m = android.graphics.Matrix().apply { postRotate(180f) }
+            android.graphics.Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, false)
+        } else bmp
+    }
+
+    private fun demoPicture(boxes: List<Box>): android.graphics.Bitmap {
+        val bmp = android.graphics.Bitmap.createBitmap(640, 360, android.graphics.Bitmap.Config.ARGB_8888)
+        val v = DemoView(this)
+        v.measure(View.MeasureSpec.makeMeasureSpec(640, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY))
+        v.layout(0, 0, 640, 360)
+        v.draw(android.graphics.Canvas(bmp))
+        drawBoxes(bmp, boxes)
+        return bmp
+    }
+
+    private fun drawBoxes(bmp: android.graphics.Bitmap, boxes: List<Box>) {
+        val c = android.graphics.Canvas(bmp)
+        val p = android.graphics.Paint().apply {
+            color = android.graphics.Color.RED; style = android.graphics.Paint.Style.STROKE; strokeWidth = 3f
+        }
+        val w = bmp.width.toFloat()
+        val h = bmp.height.toFloat()
+        boxes.forEach { c.drawRect(it.x1 * w, it.y1 * h, it.x2 * w, it.y2 * h, p) }
+    }
+
+    private fun openApp() = PendingIntent.getActivity(
+        this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
+    private fun postContact(count: Int, at: Long, picture: android.graphics.Bitmap?) {
+        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(at))
+        val b = Notification.Builder(this, CONTACT_CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("CONTACT $count")
+            .setContentText("$time${if (picture == null) "  NO PICTURE" else ""}")
+            .setWhen(at).setShowWhen(true)
+            .setCategory(Notification.CATEGORY_ALARM)
+            .setContentIntent(openApp())
+            .setAutoCancel(true)
+        if (picture != null) {
+            b.setLargeIcon(picture)
+            b.setStyle(Notification.BigPictureStyle().bigPicture(picture).bigLargeIcon(null as android.graphics.drawable.Icon?))
+        }
+        notify(100 + contactSeq++ % 20, b.build())
+    }
+
+    /** Background only: link down for 3 s -> LINK LOST (+ one long buzz); back up -> LINK RESTORED. */
+    private fun watchLink(phase: Phase, now: Long) {
+        val up = phase == Phase.LIVE || phase == Phase.STALLED
+        if (up) {
+            linkWasUp = true
+            linkDownAt = 0L
+            if (lostNotified) {
+                lostNotified = false
+                notify(LINK_NOTIFICATION, Notification.Builder(this, LINK_CHANNEL)
+                    .setSmallIcon(android.R.drawable.presence_video_online)
+                    .setContentTitle("LINK RESTORED")
+                    .setContentIntent(openApp())
+                    .setAutoCancel(true)
+                    .setTimeoutAfter(30_000)
+                    .build())
+            }
+            return
+        }
+        if (demo || !linkWasUp) return
+        if (linkDownAt == 0L) linkDownAt = now
+        if (!lostNotified && !uiVisible && now - linkDownAt > 3000) {
+            lostNotified = true
+            if (alertsEnabled) vibratePattern(longArrayOf(0, 600))
+            notify(LINK_NOTIFICATION, Notification.Builder(this, LINK_CHANNEL)
+                .setSmallIcon(android.R.drawable.presence_video_busy)
+                .setContentTitle("LINK LOST")
+                .setContentText(bleNote ?: "SEARCHING ${ssid.ifBlank { "WI-FI" }}")
+                .setCategory(Notification.CATEGORY_ALARM)
+                .setContentIntent(openApp())
+                .setOngoing(false)
+                .build())
+        }
+    }
+
+    private fun notify(id: Int, n: Notification) {
+        try { getSystemService(NotificationManager::class.java).notify(id, n) } catch (_: SecurityException) {}
+    }
+
+    private fun vibrate(double: Boolean) =
+        vibratePattern(if (double) longArrayOf(0, 90, 70, 90, 70, 90) else longArrayOf(0, 120, 80, 120))
+
+    private fun vibratePattern(timings: LongArray) {
         val effect = VibrationEffect.createWaveform(timings, -1)
         // Alarm usage so it still buzzes with the phone on silent / DND.
         if (Build.VERSION.SDK_INT >= 33) {
@@ -418,6 +543,7 @@ class LinkService : Service() {
                 bleNote = "BLE: CHECKING"
                 ble?.check(password, ssid)
             }
+            watchLink(phase, now)
             if (now - lastBoxesAt > 500 && persons != 0) {
                 persons = 0
                 listener?.onBoxes(emptyList())
@@ -430,6 +556,12 @@ class LinkService : Service() {
     // ------------------------------------------------------------------ foreground
     private fun startInForeground() {
         val nm = getSystemService(NotificationManager::class.java)
+        // Contacts and link loss: shown prominently but silent (the vibration is the audible-free cue).
+        listOf(CONTACT_CHANNEL to "Contacts", LINK_CHANNEL to "Link lost").forEach { (id, name) ->
+            nm.createNotificationChannel(NotificationChannel(id, name, NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(null, null); enableVibration(false)
+            })
+        }
         // Silent, minimal: this is a stealth device.
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, "BodyCam link", NotificationManager.IMPORTANCE_MIN).apply {
@@ -455,6 +587,10 @@ class LinkService : Service() {
     companion object {
         private val EMPTY = ByteArray(0)
         private const val CHANNEL = "link"
+        private const val CONTACT_CHANNEL = "contacts"
+        private const val LINK_CHANNEL = "link_lost"
+        private const val LINK_NOTIFICATION = 50
+        private const val KEY_NOTIFY = "notify"
         private const val KEY_AI = "ai"
         private const val KEY_ALERTS = "alerts"
         private const val KEY_VIDEO_FLIP = "video_flip"
